@@ -51,6 +51,12 @@ type txJSON struct {
 	S                    *hexutil.Big           `json:"s"`
 	YParity              *hexutil.Uint64        `json:"yParity,omitempty"`
 
+	// EIP-8130 fields: the transaction body is nested under "tx"; the two
+	// authorization blobs live at the top level.
+	Tx         *eip8130TxJSON `json:"tx,omitempty"`
+	SenderAuth *hexutil.Bytes `json:"senderAuth,omitempty"`
+	PayerAuth  *hexutil.Bytes `json:"payerAuth,omitempty"`
+
 	// Deposit transaction fields
 	SourceHash *common.Hash    `json:"sourceHash,omitempty"`
 	From       *common.Address `json:"from,omitempty"`
@@ -64,6 +70,24 @@ type txJSON struct {
 
 	// Only used for encoding:
 	Hash common.Hash `json:"hash"`
+}
+
+// eip8130TxJSON is the nested "tx" body of an EIP-8130 transaction. chainId,
+// nonceSequence, expiry and gasLimit are JSON numbers; nonceKey and the fee caps
+// are hex-string quantities; metadata is hex bytes.
+type eip8130TxJSON struct {
+	ChainID              uint64          `json:"chainId"`
+	Sender               *common.Address `json:"sender"`
+	NonceKey             *hexutil.Big    `json:"nonceKey"`
+	NonceSequence        uint64          `json:"nonceSequence"`
+	Expiry               uint64          `json:"expiry"`
+	MaxPriorityFeePerGas *hexutil.Big    `json:"maxPriorityFeePerGas"`
+	MaxFeePerGas         *hexutil.Big    `json:"maxFeePerGas"`
+	GasLimit             uint64          `json:"gasLimit"`
+	AccountChanges       []AccountChange `json:"accountChanges"`
+	Calls                [][]Call        `json:"calls"`
+	Metadata             hexutil.Bytes   `json:"metadata"`
+	Payer                *common.Address `json:"payer"`
 }
 
 // yParityValue returns the YParity value from JSON. For backwards-compatibility reasons,
@@ -178,6 +202,38 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		enc.S = (*hexutil.Big)(itx.S.ToBig())
 		yparity := itx.V.Uint64()
 		enc.YParity = (*hexutil.Uint64)(&yparity)
+
+	case *Eip8130Tx:
+		// Empty account_changes and calls serialize as JSON arrays, not null.
+		accountChanges := itx.AccountChanges
+		if accountChanges == nil {
+			accountChanges = []AccountChange{}
+		}
+		calls := itx.Calls
+		if calls == nil {
+			calls = [][]Call{}
+		}
+		body := &eip8130TxJSON{
+			Sender:               itx.Sender,
+			NonceKey:             (*hexutil.Big)(itx.NonceKey),
+			NonceSequence:        itx.NonceSequence,
+			Expiry:               itx.Expiry,
+			MaxPriorityFeePerGas: (*hexutil.Big)(itx.GasTipCap),
+			MaxFeePerGas:         (*hexutil.Big)(itx.GasFeeCap),
+			GasLimit:             itx.GasLimit,
+			AccountChanges:       accountChanges,
+			Calls:                calls,
+			Metadata:             hexutil.Bytes(itx.Metadata),
+			Payer:                itx.Payer,
+		}
+		if itx.ChainID != nil {
+			body.ChainID = itx.ChainID.Uint64()
+		}
+		enc.Tx = body
+		senderAuth := hexutil.Bytes(itx.SenderAuth)
+		enc.SenderAuth = &senderAuth
+		payerAuth := hexutil.Bytes(itx.PayerAuth)
+		enc.PayerAuth = &payerAuth
 
 	case *DepositTx:
 		enc.Gas = (*hexutil.Uint64)(&itx.Gas)
@@ -590,6 +646,44 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.Nonce != nil {
 			inner = &depositTxWithNonce{DepositTx: itx, EffectiveNonce: uint64(*dec.Nonce)}
 		}
+	case Eip8130TxType:
+		var itx Eip8130Tx
+		inner = &itx
+		if dec.Tx == nil {
+			return errors.New("missing required field 'tx' in transaction")
+		}
+		body := dec.Tx
+		itx.ChainID = new(big.Int).SetUint64(body.ChainID)
+		itx.Sender = body.Sender
+		if body.NonceKey != nil {
+			itx.NonceKey = (*big.Int)(body.NonceKey)
+		} else {
+			itx.NonceKey = new(big.Int)
+		}
+		itx.NonceSequence = body.NonceSequence
+		itx.Expiry = body.Expiry
+		if body.MaxPriorityFeePerGas == nil {
+			return errors.New("missing required field 'maxPriorityFeePerGas' for txdata")
+		}
+		itx.GasTipCap = (*big.Int)(body.MaxPriorityFeePerGas)
+		if body.MaxFeePerGas == nil {
+			return errors.New("missing required field 'maxFeePerGas' for txdata")
+		}
+		itx.GasFeeCap = (*big.Int)(body.MaxFeePerGas)
+		itx.GasLimit = body.GasLimit
+		// Empty account_changes and calls encode as the canonical RLP empty list
+		// (0xc0); nil and empty slices are equivalent here.
+		itx.AccountChanges = body.AccountChanges
+		itx.Calls = body.Calls
+		itx.Metadata = body.Metadata
+		itx.Payer = body.Payer
+		if dec.SenderAuth != nil {
+			itx.SenderAuth = *dec.SenderAuth
+		}
+		if dec.PayerAuth != nil {
+			itx.PayerAuth = *dec.PayerAuth
+		}
+
 	default:
 		return ErrTxTypeNotSupported
 	}
