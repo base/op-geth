@@ -74,16 +74,19 @@ type txJSON struct {
 
 // eip8130TxJSON is the nested "tx" body of an EIP-8130 transaction. chainId,
 // nonceSequence, expiry and gasLimit are JSON numbers; nonceKey and the fee caps
-// are hex-string quantities; metadata is hex bytes.
+// are hex-string quantities; metadata is hex bytes. chainId, nonceSequence,
+// expiry, gasLimit and the fee caps are required (pointer fields whose absence is
+// reported by UnmarshalJSON), matching the Rust consensus type where these have
+// no default.
 type eip8130TxJSON struct {
-	ChainID              uint64          `json:"chainId"`
+	ChainID              *uint64         `json:"chainId"`
 	Sender               *common.Address `json:"sender"`
 	NonceKey             *hexutil.Big    `json:"nonceKey"`
-	NonceSequence        uint64          `json:"nonceSequence"`
-	Expiry               uint64          `json:"expiry"`
+	NonceSequence        *uint64         `json:"nonceSequence"`
+	Expiry               *uint64         `json:"expiry"`
 	MaxPriorityFeePerGas *hexutil.Big    `json:"maxPriorityFeePerGas"`
 	MaxFeePerGas         *hexutil.Big    `json:"maxFeePerGas"`
-	GasLimit             uint64          `json:"gasLimit"`
+	GasLimit             *uint64         `json:"gasLimit"`
 	AccountChanges       []AccountChange `json:"accountChanges"`
 	Calls                [][]Call        `json:"calls"`
 	Metadata             hexutil.Bytes   `json:"metadata"`
@@ -213,21 +216,25 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		if calls == nil {
 			calls = [][]Call{}
 		}
+		nonceSequence := itx.NonceSequence
+		expiry := itx.Expiry
+		gasLimit := itx.GasLimit
 		body := &eip8130TxJSON{
 			Sender:               itx.Sender,
 			NonceKey:             (*hexutil.Big)(itx.NonceKey),
-			NonceSequence:        itx.NonceSequence,
-			Expiry:               itx.Expiry,
+			NonceSequence:        &nonceSequence,
+			Expiry:               &expiry,
 			MaxPriorityFeePerGas: (*hexutil.Big)(itx.GasTipCap),
 			MaxFeePerGas:         (*hexutil.Big)(itx.GasFeeCap),
-			GasLimit:             itx.GasLimit,
+			GasLimit:             &gasLimit,
 			AccountChanges:       accountChanges,
 			Calls:                calls,
 			Metadata:             hexutil.Bytes(itx.Metadata),
 			Payer:                itx.Payer,
 		}
 		if itx.ChainID != nil {
-			body.ChainID = itx.ChainID.Uint64()
+			chainID := itx.ChainID.Uint64()
+			body.ChainID = &chainID
 		}
 		enc.Tx = body
 		senderAuth := hexutil.Bytes(itx.SenderAuth)
@@ -653,15 +660,27 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 			return errors.New("missing required field 'tx' in transaction")
 		}
 		body := dec.Tx
-		itx.ChainID = new(big.Int).SetUint64(body.ChainID)
+		if body.ChainID == nil {
+			return errors.New("missing required field 'chainId' for txdata")
+		}
+		itx.ChainID = new(big.Int).SetUint64(*body.ChainID)
 		itx.Sender = body.Sender
 		if body.NonceKey != nil {
+			if (*big.Int)(body.NonceKey).BitLen() > 256 {
+				return errors.New("'nonceKey' value overflows uint256")
+			}
 			itx.NonceKey = (*big.Int)(body.NonceKey)
 		} else {
 			itx.NonceKey = new(big.Int)
 		}
-		itx.NonceSequence = body.NonceSequence
-		itx.Expiry = body.Expiry
+		if body.NonceSequence == nil {
+			return errors.New("missing required field 'nonceSequence' for txdata")
+		}
+		itx.NonceSequence = *body.NonceSequence
+		if body.Expiry == nil {
+			return errors.New("missing required field 'expiry' for txdata")
+		}
+		itx.Expiry = *body.Expiry
 		if body.MaxPriorityFeePerGas == nil {
 			return errors.New("missing required field 'maxPriorityFeePerGas' for txdata")
 		}
@@ -670,7 +689,10 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 			return errors.New("missing required field 'maxFeePerGas' for txdata")
 		}
 		itx.GasFeeCap = (*big.Int)(body.MaxFeePerGas)
-		itx.GasLimit = body.GasLimit
+		if body.GasLimit == nil {
+			return errors.New("missing required field 'gasLimit' for txdata")
+		}
+		itx.GasLimit = *body.GasLimit
 		// Empty account_changes and calls encode as the canonical RLP empty list
 		// (0xc0); nil and empty slices are equivalent here.
 		itx.AccountChanges = body.AccountChanges

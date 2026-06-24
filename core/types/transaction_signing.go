@@ -272,9 +272,17 @@ func (s *modernSigner) Sender(tx *Transaction) (common.Address, error) {
 		}
 	}
 
-	// EIP-8130 puts its authorization in the sender_auth and payer_auth fields, not in
-	// the canonical (v, r, s) fields, so the generic signer cannot recover a sender
-	// here. Return the zero address rather than attempting a signature recovery.
+	// EIP-8130 sender derivation is account-abstraction-specific: authorization
+	// lives in the sender_auth and payer_auth fields, not in the canonical
+	// (v, r, s) fields. The generic modernSigner intentionally returns the zero
+	// address here (a deliberate divergence from DepositTx, which stores From
+	// directly above); real sender resolution happens in EIP-8130 execution /
+	// authorization, not the signer.
+	//
+	// This branch also short-circuits before the generic chain-id check below:
+	// chain-id / replay binding for 0x7B is not enforced by the signer layer but
+	// by EIP-8130 execution validation (per-ConfigChange chain_id and the tx
+	// chain_id bound during authorization).
 	if tt == Eip8130TxType {
 		return common.Address{}, nil
 	}

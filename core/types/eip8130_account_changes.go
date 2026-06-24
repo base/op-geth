@@ -67,6 +67,23 @@ func (t *ActorChangeType) UnmarshalJSON(input []byte) error {
 	return nil
 }
 
+// DecodeRLP reads the op byte and rejects any value other than Authorize (0x01)
+// or Revoke (0x02), matching the Rust strict decode (ActorChangeType::from_op_byte).
+// Without this, the derived uint8 decoder would accept any byte 0x00..0xff.
+func (t *ActorChangeType) DecodeRLP(s *rlp.Stream) error {
+	b, err := s.Uint8()
+	if err != nil {
+		return err
+	}
+	switch ActorChangeType(b) {
+	case ActorChangeAuthorize, ActorChangeRevoke:
+		*t = ActorChangeType(b)
+		return nil
+	default:
+		return fmt.Errorf("eip8130: invalid actor change type byte 0x%x", b)
+	}
+}
+
 // InitialActor is an actor installed on a newly-created account. Wire form is
 // rlp([actorId, authenticator]).
 type InitialActor struct {
@@ -115,21 +132,46 @@ type AccountChange struct {
 	Delegation   *Delegation
 }
 
+// resolveBody returns the wire type byte, the JSON discriminator and the body
+// value of the single set body pointer. It enforces the tagged-union invariant
+// that exactly one of Create/ConfigChange/Delegation is set, matching the Rust
+// enum, which can only ever hold a single variant. The returned body has its
+// nil nested slices normalized to empty slices so JSON marshalling emits [] (to
+// match serde's Vec) rather than null; the original AccountChange is never
+// mutated.
+func (a AccountChange) resolveBody() (typeByte byte, typ string, body interface{}, err error) {
+	n := 0
+	if a.Create != nil {
+		n++
+		cpy := *a.Create
+		if cpy.InitialActors == nil {
+			cpy.InitialActors = []InitialActor{}
+		}
+		typeByte, typ, body = accountChangeTypeCreate, "create", &cpy
+	}
+	if a.ConfigChange != nil {
+		n++
+		cpy := *a.ConfigChange
+		if cpy.ActorChanges == nil {
+			cpy.ActorChanges = []ActorChange{}
+		}
+		typeByte, typ, body = accountChangeTypeConfig, "configChange", &cpy
+	}
+	if a.Delegation != nil {
+		n++
+		typeByte, typ, body = accountChangeTypeDelegation, "delegation", a.Delegation
+	}
+	if n != 1 {
+		return 0, "", nil, errors.New("eip8130: account change must set exactly one body")
+	}
+	return typeByte, typ, body, nil
+}
+
 // EncodeRLP writes the entry as type_byte || rlp(body).
 func (a AccountChange) EncodeRLP(w io.Writer) error {
-	var (
-		typeByte byte
-		body     interface{}
-	)
-	switch {
-	case a.Create != nil:
-		typeByte, body = accountChangeTypeCreate, a.Create
-	case a.ConfigChange != nil:
-		typeByte, body = accountChangeTypeConfig, a.ConfigChange
-	case a.Delegation != nil:
-		typeByte, body = accountChangeTypeDelegation, a.Delegation
-	default:
-		return errors.New("eip8130: empty account change")
+	typeByte, _, body, err := a.resolveBody()
+	if err != nil {
+		return err
 	}
 	if _, err := w.Write([]byte{typeByte}); err != nil {
 		return err
@@ -140,14 +182,20 @@ func (a AccountChange) EncodeRLP(w io.Writer) error {
 // DecodeRLP reads the type byte and decodes the matching body. Returns rlp.EOL
 // at the end of the enclosing list so it composes with slice decoding.
 func (a *AccountChange) DecodeRLP(s *rlp.Stream) error {
-	typeByte, err := s.Bytes()
+	// The type byte is written as a single literal byte (see EncodeRLP), matching
+	// the Rust reader, which reads buf[0] verbatim. Read it back as a raw byte so
+	// the decode is byte-identical for any value: Raw() returns a one-element slice
+	// only for canonical single bytes (0x00..0x7f); a 0x80+ value RLP-encodes as a
+	// multi-byte string and is rejected here, exactly as Rust routes it to the
+	// invalid-type branch.
+	raw, err := s.Raw()
 	if err != nil {
 		return err
 	}
-	if len(typeByte) != 1 {
+	if len(raw) != 1 {
 		return errors.New("eip8130: invalid account change type byte")
 	}
-	switch typeByte[0] {
+	switch raw[0] {
 	case accountChangeTypeCreate:
 		a.Create = new(CreateEntry)
 		return s.Decode(a.Create)
@@ -158,25 +206,15 @@ func (a *AccountChange) DecodeRLP(s *rlp.Stream) error {
 		a.Delegation = new(Delegation)
 		return s.Decode(a.Delegation)
 	default:
-		return fmt.Errorf("eip8130: invalid account change type byte 0x%x", typeByte[0])
+		return fmt.Errorf("eip8130: invalid account change type byte 0x%x", raw[0])
 	}
 }
 
 // MarshalJSON encodes the entry as its body object plus a "type" discriminator.
 func (a AccountChange) MarshalJSON() ([]byte, error) {
-	var (
-		typ  string
-		body interface{}
-	)
-	switch {
-	case a.Create != nil:
-		typ, body = "create", a.Create
-	case a.ConfigChange != nil:
-		typ, body = "configChange", a.ConfigChange
-	case a.Delegation != nil:
-		typ, body = "delegation", a.Delegation
-	default:
-		return nil, errors.New("eip8130: empty account change")
+	_, typ, body, err := a.resolveBody()
+	if err != nil {
+		return nil, err
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {

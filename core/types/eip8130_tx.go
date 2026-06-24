@@ -51,7 +51,7 @@ func (tx *Eip8130Tx) copy() TxData {
 		NonceSequence:  tx.NonceSequence,
 		Expiry:         tx.Expiry,
 		GasLimit:       tx.GasLimit,
-		AccountChanges: append([]AccountChange(nil), tx.AccountChanges...),
+		AccountChanges: copyAccountChanges(tx.AccountChanges),
 		Calls:          copyCalls(tx.Calls),
 		Metadata:       common.CopyBytes(tx.Metadata),
 		Payer:          copyAddressPtr(tx.Payer),
@@ -86,12 +86,20 @@ func (tx *Eip8130Tx) data() []byte           { return nil }
 func (tx *Eip8130Tx) gas() uint64            { return tx.GasLimit }
 func (tx *Eip8130Tx) gasFeeCap() *big.Int    { return tx.GasFeeCap }
 func (tx *Eip8130Tx) gasTipCap() *big.Int    { return tx.GasTipCap }
-func (tx *Eip8130Tx) gasPrice() *big.Int     { return tx.GasFeeCap }
-func (tx *Eip8130Tx) value() *big.Int        { return common.Big0 }
-func (tx *Eip8130Tx) nonce() uint64          { return tx.NonceSequence }
-func (tx *Eip8130Tx) to() *common.Address    { return nil }
-func (tx *Eip8130Tx) isSystemTx() bool       { return false }
 
+// gasPrice returns GasFeeCap. Precondition: GasFeeCap is always non-nil; see
+// effectiveGasPrice for where this is guaranteed.
+func (tx *Eip8130Tx) gasPrice() *big.Int  { return tx.GasFeeCap }
+func (tx *Eip8130Tx) value() *big.Int     { return common.Big0 }
+func (tx *Eip8130Tx) nonce() uint64       { return tx.NonceSequence }
+func (tx *Eip8130Tx) to() *common.Address { return nil }
+func (tx *Eip8130Tx) isSystemTx() bool    { return false }
+
+// effectiveGasPrice computes the effective gas price from the fee caps and base
+// fee. Precondition: GasFeeCap and GasTipCap are always non-nil. This holds
+// because RLP decode always populates the *big.Int fields and JSON decode
+// requires maxFeePerGas/maxPriorityFeePerGas (see UnmarshalJSON's
+// missing-required-field checks); an in-memory tx is expected to set them too.
 func (tx *Eip8130Tx) effectiveGasPrice(dst *big.Int, baseFee *big.Int) *big.Int {
 	if baseFee == nil {
 		return dst.Set(tx.GasFeeCap)
@@ -115,16 +123,73 @@ func (tx *Eip8130Tx) setSignatureValues(chainID, v, r, s *big.Int) {
 	tx.ChainID = chainID
 }
 
-// copyCalls deep-copies the call phases.
+// copyCalls deep-copies the call phases, including each call's Data slice, so the
+// copy shares no backing array with the original.
 func copyCalls(calls [][]Call) [][]Call {
 	if calls == nil {
 		return nil
 	}
 	cpy := make([][]Call, len(calls))
 	for i, phase := range calls {
-		cpy[i] = append([]Call(nil), phase...)
+		if phase == nil {
+			continue
+		}
+		cpyPhase := make([]Call, len(phase))
+		for j, c := range phase {
+			cpyPhase[j] = Call{To: c.To, Data: common.CopyBytes(c.Data)}
+		}
+		cpy[i] = cpyPhase
 	}
 	return cpy
+}
+
+// copyAccountChanges deep-copies the account-change entries, cloning the body
+// pointers and every inner slice so the copy cannot alias the original.
+func copyAccountChanges(changes []AccountChange) []AccountChange {
+	if changes == nil {
+		return nil
+	}
+	cpy := make([]AccountChange, len(changes))
+	for i, ac := range changes {
+		cpy[i] = ac.copy()
+	}
+	return cpy
+}
+
+// copy returns a deep copy of the entry: the set body pointer and all of its
+// inner slices are cloned so neither the copy nor the original aliases the other.
+func (a AccountChange) copy() AccountChange {
+	switch {
+	case a.Create != nil:
+		actors := append([]InitialActor(nil), a.Create.InitialActors...)
+		return AccountChange{Create: &CreateEntry{
+			UserSalt:      a.Create.UserSalt,
+			Code:          common.CopyBytes(a.Create.Code),
+			InitialActors: actors,
+		}}
+	case a.ConfigChange != nil:
+		var changes []ActorChange
+		if a.ConfigChange.ActorChanges != nil {
+			changes = make([]ActorChange, len(a.ConfigChange.ActorChanges))
+			for i, c := range a.ConfigChange.ActorChanges {
+				changes[i] = ActorChange{
+					ChangeType: c.ChangeType,
+					ActorID:    c.ActorID,
+					Data:       common.CopyBytes(c.Data),
+				}
+			}
+		}
+		return AccountChange{ConfigChange: &ConfigChange{
+			ChainID:      a.ConfigChange.ChainID,
+			Sequence:     a.ConfigChange.Sequence,
+			ActorChanges: changes,
+			Auth:         common.CopyBytes(a.ConfigChange.Auth),
+		}}
+	case a.Delegation != nil:
+		return AccountChange{Delegation: &Delegation{Target: a.Delegation.Target}}
+	default:
+		return AccountChange{}
+	}
 }
 
 func (tx *Eip8130Tx) encode(b *bytes.Buffer) error {
@@ -137,9 +202,12 @@ func (tx *Eip8130Tx) decode(input []byte) error {
 	return rlp.DecodeBytes(input, tx)
 }
 
-// sigHash is not implemented: EIP-8130 puts its authorization in the sender_auth
-// and payer_auth fields, not in the canonical (v, r, s) fields, and any recovery
-// uses an EIP-8130-specific payload, so the generic signing-hash path does not apply.
+// sigHash has no meaningful value for EIP-8130: authorization lives in the
+// sender_auth and payer_auth fields, not in the canonical (v, r, s) fields, and
+// any recovery uses an EIP-8130-specific payload, so the generic signing-hash
+// path does not apply. It returns the zero hash as a sentinel rather than
+// panicking; the signer never consumes it (modernSigner.Sender short-circuits
+// 0x7B before reaching the hash path).
 func (tx *Eip8130Tx) sigHash(*big.Int) common.Hash {
-	panic("eip8130 transactions are not signed")
+	return common.Hash{}
 }
