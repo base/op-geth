@@ -51,7 +51,7 @@ const (
 	DynamicFeeTxType = 0x02
 	BlobTxType       = 0x03
 	SetCodeTxType    = 0x04
-	Eip8130TxType    = 0x7B
+	Eip8130TxType    = 0x79
 )
 
 // Transaction is an Ethereum transaction.
