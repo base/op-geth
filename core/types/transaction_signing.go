@@ -280,7 +280,7 @@ func (s *modernSigner) Sender(tx *Transaction) (common.Address, error) {
 	// authorization, not the signer.
 	//
 	// This branch also short-circuits before the generic chain-id check below:
-	// chain-id / replay binding for 0x7B is not enforced by the signer layer but
+	// chain-id / replay binding for 0x79 is not enforced by the signer layer but
 	// by EIP-8130 execution validation (per-ConfigChange chain_id and the tx
 	// chain_id bound during authorization).
 	if tt == Eip8130TxType {

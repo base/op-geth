@@ -207,7 +207,7 @@ func (tx *Eip8130Tx) decode(input []byte) error {
 // any recovery uses an EIP-8130-specific payload, so the generic signing-hash
 // path does not apply. It returns the zero hash as a sentinel rather than
 // panicking; the signer never consumes it (modernSigner.Sender short-circuits
-// 0x7B before reaching the hash path).
+// 0x79 before reaching the hash path).
 func (tx *Eip8130Tx) sigHash(*big.Int) common.Hash {
 	return common.Hash{}
 }

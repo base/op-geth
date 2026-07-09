@@ -223,7 +223,7 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 }
 
 // TestEip8130TxWireLiteralRoundTrip starts from a hand-built canonical
-// 0x7b||rlp(...) wire encoding with empty account_changes / calls (0xc0) and empty
+// 0x79||rlp(...) wire encoding with empty account_changes / calls (0xc0) and empty
 // auth, decodes it, and re-encodes it. It also checks that a transaction built with
 // nil account_changes / calls encodes to that same canonical wire: empty fields must
 // become the RLP empty list (0xc0) so the 2718 stream keeps its full element count.
@@ -497,7 +497,7 @@ func TestEip8130TxJSONVariants(t *testing.T) {
 func TestEip8130TxJSONRethShape(t *testing.T) {
 	senderAuth := "0x" + strings.Repeat("ab", 32)
 	input := `{
-		"type":"0x7b",
+		"type":"0x79",
 		"tx":{
 			"chainId":8453,
 			"sender":"0x0000000000000000000000000000000000000011",
@@ -572,7 +572,7 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 		t.Fatalf("unmarshal output: %v", err)
 	}
 	for k, want := range map[string]string{
-		"type":       `"0x7b"`,
+		"type":       `"0x79"`,
 		"senderAuth": `"` + senderAuth + `"`,
 		"payerAuth":  `"0x"`,
 	} {
