@@ -165,6 +165,7 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 		Code:     []byte{0x60, 0x80, 0x60, 0x40, 0x52},
 		InitialActors: []InitialActor{
 			{ActorID: common.Hash{0x33}, Authenticator: common.Address{0xbb}},
+			{ActorID: common.Hash{0x66}, Authenticator: common.Address{0xcc}, Scope: 0x04, PolicyData: []byte{0xde, 0xad}},
 		},
 	}}
 	configChange := AccountChange{ConfigChange: &ConfigChange{
@@ -333,7 +334,7 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 			{Create: &CreateEntry{
 				UserSalt:      common.Hash{0x22},
 				Code:          []byte{0x60, 0x80},
-				InitialActors: []InitialActor{{ActorID: common.Hash{0x33}, Authenticator: common.Address{0xbb}}},
+				InitialActors: []InitialActor{{ActorID: common.Hash{0x33}, Authenticator: common.Address{0xbb}, Scope: 0x04, PolicyData: []byte{0xde, 0xad}}},
 			}},
 			{ConfigChange: &ConfigChange{
 				ChainID:      8453,
@@ -376,6 +377,7 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 	orig.GasFeeCap.SetInt64(6666)
 	orig.AccountChanges[0].Create.Code[0] = 0xff
 	orig.AccountChanges[0].Create.InitialActors[0].ActorID[0] = 0xff
+	orig.AccountChanges[0].Create.InitialActors[0].PolicyData[0] = 0xff
 	orig.AccountChanges[1].ConfigChange.ActorChanges[0].Data[0] = 0xff
 	orig.AccountChanges[1].ConfigChange.Auth[0] = 0xff
 	orig.Calls[0][0].Data[0] = 0xff
@@ -621,27 +623,36 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 }
 
 // TestEip8130AccountChangeRejectsMalformedRLP locks the strict-decode rejection
-// branches: an unknown account-change type byte, a multi-byte (0x80+) type byte
-// that diverges from the Rust literal-byte reader, and an actor-change op byte
-// other than Authorize/Revoke. Round-trip tests only exercise valid input, so
-// these malformed-input paths would otherwise be unguarded.
+// branches: an unknown account-change type byte inside an otherwise well-formed
+// entry list, trailing elements after the body fields, and an actor-change op
+// byte other than Authorize/Revoke. Round-trip tests only exercise valid input,
+// so these malformed-input paths would otherwise be unguarded.
 func TestEip8130AccountChangeRejectsMalformedRLP(t *testing.T) {
 	t.Run("unknown type byte", func(t *testing.T) {
-		// 0x03 is a valid single RLP byte but not a known account-change type.
+		// [0x03]: a well-formed one-element RLP list whose type byte is not a
+		// known account-change type. (0xc1 = list of 1 byte, 0x03 = type byte.)
 		var ac AccountChange
-		err := rlp.DecodeBytes([]byte{0x03}, &ac)
+		err := rlp.DecodeBytes([]byte{0xc1, 0x03}, &ac)
 		if err == nil || !strings.Contains(err.Error(), "invalid account change type byte") {
 			t.Fatalf("want invalid-type-byte error, got %v", err)
 		}
 	})
 
-	t.Run("multibyte type byte", func(t *testing.T) {
-		// A 0x80+ first element RLP-encodes as a multi-byte string; the decoder
-		// must reject it rather than read it like the Rust literal-byte reader.
+	t.Run("trailing elements", func(t *testing.T) {
+		// A delegation entry [0x02, target] with an extra trailing element must be
+		// rejected: the list has to be fully consumed after the body fields.
+		body, err := rlp.EncodeToBytes([]interface{}{
+			uint8(accountChangeTypeDelegation),
+			common.Address{0xdd},
+			uint8(0xff), // trailing element
+		})
+		if err != nil {
+			t.Fatalf("encode trailing entry: %v", err)
+		}
+
 		var ac AccountChange
-		err := rlp.DecodeBytes([]byte{0x82, 0xaa, 0xbb}, &ac)
-		if err == nil || !strings.Contains(err.Error(), "invalid account change type byte") {
-			t.Fatalf("want invalid-type-byte error, got %v", err)
+		if err := rlp.DecodeBytes(body, &ac); err == nil {
+			t.Fatalf("want error for trailing elements, got nil")
 		}
 	})
 

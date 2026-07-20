@@ -161,7 +161,19 @@ func copyAccountChanges(changes []AccountChange) []AccountChange {
 func (a AccountChange) copy() AccountChange {
 	switch {
 	case a.Create != nil:
-		actors := append([]InitialActor(nil), a.Create.InitialActors...)
+		var actors []InitialActor
+		if a.Create.InitialActors != nil {
+			actors = make([]InitialActor, len(a.Create.InitialActors))
+			for i, ia := range a.Create.InitialActors {
+				actors[i] = InitialActor{
+					ActorID:       ia.ActorID,
+					Authenticator: ia.Authenticator,
+					Scope:         ia.Scope,
+					PolicyData:    common.CopyBytes(ia.PolicyData),
+				}
+			}
+		}
+
 		return AccountChange{Create: &CreateEntry{
 			UserSalt:      a.Create.UserSalt,
 			Code:          common.CopyBytes(a.Create.Code),
@@ -179,6 +191,7 @@ func (a AccountChange) copy() AccountChange {
 				}
 			}
 		}
+
 		return AccountChange{ConfigChange: &ConfigChange{
 			ChainID:      a.ConfigChange.ChainID,
 			Sequence:     a.ConfigChange.Sequence,

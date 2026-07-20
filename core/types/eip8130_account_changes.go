@@ -27,8 +27,8 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-// EIP-8130 account_changes entry type bytes. On the wire each entry is encoded
-// as type_byte || rlp([body fields...]).
+// EIP-8130 account_changes entry type bytes. On the wire each entry is a single
+// flat RLP list whose first element is the type byte: rlp([type_byte, fields...]).
 const (
 	accountChangeTypeCreate     = 0x00
 	accountChangeTypeConfig     = 0x01
@@ -85,10 +85,14 @@ func (t *ActorChangeType) DecodeRLP(s *rlp.Stream) error {
 }
 
 // InitialActor is an actor installed on a newly-created account. Wire form is
-// rlp([actorId, authenticator]).
+// rlp([actorId, authenticator, scope, policyData]); scope is stored verbatim
+// (0x00 = unrestricted admin) and policyData is empty unless scope sets the
+// POLICY bit.
 type InitialActor struct {
 	ActorID       common.Hash    `json:"actorId"`
 	Authenticator common.Address `json:"authenticator"`
+	Scope         uint8          `json:"scope"`
+	PolicyData    hexutil.Bytes  `json:"policyData"`
 }
 
 // ActorChange is a single actor authorize/revoke operation inside a ConfigChange.
@@ -123,9 +127,12 @@ type Delegation struct {
 }
 
 // AccountChange is a tagged-union entry inside Eip8130Tx.AccountChanges. Exactly
-// one of the body pointers is set. On the wire each entry is
-// type_byte || rlp([body fields...]); in JSON it is the body object with an added
-// "type" discriminator ("create" / "configChange" / "delegation").
+// one of the body pointers is set. On the wire each entry is a single flat RLP
+// list whose first element is the type byte, followed by the body fields inline:
+// rlp([type_byte, body fields...]). The type byte is a genuine list element (not
+// an EIP-2718-style type_byte || rlp(...) prefix), so each entry is one
+// self-contained RLP item. In JSON it is the body object with an added "type"
+// discriminator ("create" / "configChange" / "delegation").
 type AccountChange struct {
 	Create       *CreateEntry
 	ConfigChange *ConfigChange
@@ -167,47 +174,103 @@ func (a AccountChange) resolveBody() (typeByte byte, typ string, body interface{
 	return typeByte, typ, body, nil
 }
 
-// EncodeRLP writes the entry as type_byte || rlp(body).
+// EncodeRLP writes the entry as a single flat list rlp([type_byte, body
+// fields...]). The type byte is an in-list element encoded as an RLP uint (e.g.
+// 0x00 -> 0x80), followed by the set body's fields inline, mirroring the Rust
+// encoder.
 func (a AccountChange) EncodeRLP(w io.Writer) error {
 	typeByte, _, body, err := a.resolveBody()
 	if err != nil {
 		return err
 	}
-	if _, err := w.Write([]byte{typeByte}); err != nil {
-		return err
+
+	buf := rlp.NewEncoderBuffer(w)
+	list := buf.List()
+	buf.WriteUint64(uint64(typeByte))
+
+	// The body's fields are written inline (no inner list header) so the whole
+	// entry is one flat list.
+	switch b := body.(type) {
+	case *CreateEntry:
+		buf.WriteBytes(b.UserSalt[:])
+		buf.WriteBytes(b.Code)
+		if err := rlp.Encode(buf, b.InitialActors); err != nil {
+			return err
+		}
+	case *ConfigChange:
+		buf.WriteUint64(b.ChainID)
+		buf.WriteUint64(b.Sequence)
+		if err := rlp.Encode(buf, b.ActorChanges); err != nil {
+			return err
+		}
+		buf.WriteBytes(b.Auth)
+	case *Delegation:
+		buf.WriteBytes(b.Target[:])
+	default:
+		return fmt.Errorf("eip8130: unexpected account change body %T", body)
 	}
-	return rlp.Encode(w, body)
+
+	buf.ListEnd(list)
+	return buf.Flush()
 }
 
-// DecodeRLP reads the type byte and decodes the matching body. Returns rlp.EOL
-// at the end of the enclosing list so it composes with slice decoding.
+// DecodeRLP reads the single flat list, reads the type byte as an RLP uint,
+// dispatches on it and decodes the body fields positionally, then enforces that
+// the list is fully consumed. Rejects any unknown type byte. Returns rlp.EOL at
+// the end of the enclosing list so it composes with slice decoding.
 func (a *AccountChange) DecodeRLP(s *rlp.Stream) error {
-	// The type byte is written as a single literal byte (see EncodeRLP), matching
-	// the Rust reader, which reads buf[0] verbatim. Read it back as a raw byte so
-	// the decode is byte-identical for any value: Raw() returns a one-element slice
-	// only for canonical single bytes (0x00..0x7f); a 0x80+ value RLP-encodes as a
-	// multi-byte string and is rejected here, exactly as Rust routes it to the
-	// invalid-type branch.
-	raw, err := s.Raw()
+	if _, err := s.List(); err != nil {
+		return err
+	}
+	typeByte, err := s.Uint8()
 	if err != nil {
 		return err
 	}
-	if len(raw) != 1 {
-		return errors.New("eip8130: invalid account change type byte")
-	}
-	switch raw[0] {
+
+	switch typeByte {
 	case accountChangeTypeCreate:
-		a.Create = new(CreateEntry)
-		return s.Decode(a.Create)
+		body := new(CreateEntry)
+		if err := s.Decode(&body.UserSalt); err != nil {
+			return err
+		}
+		var code []byte
+		if err := s.Decode(&code); err != nil {
+			return err
+		}
+		body.Code = code
+		if err := s.Decode(&body.InitialActors); err != nil {
+			return err
+		}
+		a.Create = body
 	case accountChangeTypeConfig:
-		a.ConfigChange = new(ConfigChange)
-		return s.Decode(a.ConfigChange)
+		body := new(ConfigChange)
+		if err := s.Decode(&body.ChainID); err != nil {
+			return err
+		}
+		if err := s.Decode(&body.Sequence); err != nil {
+			return err
+		}
+		if err := s.Decode(&body.ActorChanges); err != nil {
+			return err
+		}
+		var auth []byte
+		if err := s.Decode(&auth); err != nil {
+			return err
+		}
+		body.Auth = auth
+		a.ConfigChange = body
 	case accountChangeTypeDelegation:
-		a.Delegation = new(Delegation)
-		return s.Decode(a.Delegation)
+		body := new(Delegation)
+		if err := s.Decode(&body.Target); err != nil {
+			return err
+		}
+		a.Delegation = body
 	default:
-		return fmt.Errorf("eip8130: invalid account change type byte 0x%x", raw[0])
+		return fmt.Errorf("eip8130: invalid account change type byte 0x%x", typeByte)
 	}
+
+	// Enforce that the list is fully consumed (no trailing elements).
+	return s.ListEnd()
 }
 
 // MarshalJSON encodes the entry as its body object plus a "type" discriminator.
