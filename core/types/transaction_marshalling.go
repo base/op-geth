@@ -73,17 +73,18 @@ type txJSON struct {
 }
 
 // eip8130TxJSON is the nested "tx" body of an EIP-8130 transaction. chainId,
-// nonceSequence, expiry and gasLimit are JSON numbers; nonceKey and the fee caps
-// are hex-string quantities; metadata is hex bytes. chainId, nonceSequence,
-// expiry, gasLimit and the fee caps are required (pointer fields whose absence is
-// reported by UnmarshalJSON), matching the Rust consensus type where these have
-// no default.
+// nonceSequence, validAfter, validBefore and gasLimit are JSON numbers; nonceKey
+// and the fee caps are hex-string quantities; metadata is hex bytes. chainId,
+// nonceSequence, both validity bounds, gasLimit and the fee caps are required
+// (pointer fields whose absence is reported by UnmarshalJSON), matching the Rust
+// consensus type where these have no default.
 type eip8130TxJSON struct {
 	ChainID              *uint64         `json:"chainId"`
 	Sender               *common.Address `json:"sender"`
 	NonceKey             *hexutil.Big    `json:"nonceKey"`
 	NonceSequence        *uint64         `json:"nonceSequence"`
-	Expiry               *uint64         `json:"expiry"`
+	ValidAfter           *uint64         `json:"validAfter"`
+	ValidBefore          *uint64         `json:"validBefore"`
 	MaxPriorityFeePerGas *hexutil.Big    `json:"maxPriorityFeePerGas"`
 	MaxFeePerGas         *hexutil.Big    `json:"maxFeePerGas"`
 	GasLimit             *uint64         `json:"gasLimit"`
@@ -217,13 +218,15 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 			calls = [][]Call{}
 		}
 		nonceSequence := itx.NonceSequence
-		expiry := itx.Expiry
+		validAfter := itx.ValidAfter
+		validBefore := itx.ValidBefore
 		gasLimit := itx.GasLimit
 		body := &eip8130TxJSON{
 			Sender:               itx.Sender,
 			NonceKey:             (*hexutil.Big)(itx.NonceKey),
 			NonceSequence:        &nonceSequence,
-			Expiry:               &expiry,
+			ValidAfter:           &validAfter,
+			ValidBefore:          &validBefore,
 			MaxPriorityFeePerGas: (*hexutil.Big)(itx.GasTipCap),
 			MaxFeePerGas:         (*hexutil.Big)(itx.GasFeeCap),
 			GasLimit:             &gasLimit,
@@ -677,10 +680,14 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 			return errors.New("missing required field 'nonceSequence' for txdata")
 		}
 		itx.NonceSequence = *body.NonceSequence
-		if body.Expiry == nil {
-			return errors.New("missing required field 'expiry' for txdata")
+		if body.ValidAfter == nil {
+			return errors.New("missing required field 'validAfter' for txdata")
 		}
-		itx.Expiry = *body.Expiry
+		itx.ValidAfter = *body.ValidAfter
+		if body.ValidBefore == nil {
+			return errors.New("missing required field 'validBefore' for txdata")
+		}
+		itx.ValidBefore = *body.ValidBefore
 		if body.MaxPriorityFeePerGas == nil {
 			return errors.New("missing required field 'maxPriorityFeePerGas' for txdata")
 		}

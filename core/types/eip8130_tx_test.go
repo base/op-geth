@@ -73,7 +73,8 @@ func TestEip8130TxBinaryRoundTrip(t *testing.T) {
 				Sender:        nil,
 				NonceKey:      big.NewInt(0),
 				NonceSequence: 7,
-				Expiry:        100,
+				ValidAfter:    100,
+				ValidBefore:   200,
 				GasTipCap:     big.NewInt(1),
 				GasFeeCap:     big.NewInt(2),
 				GasLimit:      21000,
@@ -88,7 +89,8 @@ func TestEip8130TxBinaryRoundTrip(t *testing.T) {
 				Sender:        ptrAddr(0x11),
 				NonceKey:      big.NewInt(3),
 				NonceSequence: 8,
-				Expiry:        200,
+				ValidAfter:    200,
+				ValidBefore:   300,
 				GasTipCap:     big.NewInt(5),
 				GasFeeCap:     big.NewInt(9),
 				GasLimit:      50000,
@@ -104,7 +106,8 @@ func TestEip8130TxBinaryRoundTrip(t *testing.T) {
 				Sender:        ptrAddr(0x22),
 				NonceKey:      big.NewInt(4),
 				NonceSequence: 9,
-				Expiry:        300,
+				ValidAfter:    300,
+				ValidBefore:   400,
 				GasTipCap:     big.NewInt(6),
 				GasFeeCap:     big.NewInt(10),
 				GasLimit:      60000,
@@ -122,7 +125,8 @@ func TestEip8130TxBinaryRoundTrip(t *testing.T) {
 				Sender:        ptrAddr(0x00),
 				NonceKey:      big.NewInt(0),
 				NonceSequence: 10,
-				Expiry:        0,
+				ValidAfter:    0,
+				ValidBefore:   0,
 				GasTipCap:     big.NewInt(7),
 				GasFeeCap:     big.NewInt(11),
 				GasLimit:      70000,
@@ -231,12 +235,13 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 func TestEip8130TxWireLiteralRoundTrip(t *testing.T) {
 	want := []byte{
 		Eip8130TxType,
-		0xd0,             // list, 16 payload bytes
+		0xd1,             // list, 17 payload bytes
 		0x01,             // chainID = 1
 		0x80,             // sender = nil
 		0x80,             // nonceKey = 0
 		0x07,             // nonceSequence = 7
-		0x80,             // expiry = 0
+		0x2a,             // validAfter = 42
+		0x63,             // validBefore = 99
 		0x01,             // gasTipCap = 1
 		0x02,             // gasFeeCap = 2
 		0x82, 0x52, 0x08, // gasLimit = 21000
@@ -265,6 +270,8 @@ func TestEip8130TxWireLiteralRoundTrip(t *testing.T) {
 		ChainID:       big.NewInt(1),
 		NonceKey:      big.NewInt(0),
 		NonceSequence: 7,
+		ValidAfter:    42,
+		ValidBefore:   99,
 		GasTipCap:     big.NewInt(1),
 		GasFeeCap:     big.NewInt(2),
 		GasLimit:      21000,
@@ -276,6 +283,29 @@ func TestEip8130TxWireLiteralRoundTrip(t *testing.T) {
 	if !bytes.Equal(builtEnc, want) {
 		t.Fatalf("nil empties not encoded as canonical 0xc0:\n got %x\nwant %x", builtEnc, want)
 	}
+
+	legacy := []byte{
+		Eip8130TxType,
+		0xd0,             // list, 16 payload bytes
+		0x01,             // chainID = 1
+		0x80,             // sender = nil
+		0x80,             // nonceKey = 0
+		0x07,             // nonceSequence = 7
+		0x80,             // legacy expiry = 0
+		0x01,             // gasTipCap = 1
+		0x02,             // gasFeeCap = 2
+		0x82, 0x52, 0x08, // gasLimit = 21000
+		0xc0, // accountChanges = empty list
+		0xc0, // calls = empty list
+		0x80, // metadata = empty
+		0x80, // payer = nil
+		0x80, // senderAuth = empty
+		0x80, // payerAuth = empty
+	}
+	var legacyTx Transaction
+	if err := legacyTx.UnmarshalBinary(legacy); err == nil {
+		t.Fatal("legacy expiry wire shape decoded successfully")
+	}
 }
 
 // TestEip8130TxJSONRoundTrip verifies that the JSON representation preserves all
@@ -286,7 +316,8 @@ func TestEip8130TxJSONRoundTrip(t *testing.T) {
 		Sender:        ptrAddr(0x22),
 		NonceKey:      big.NewInt(4),
 		NonceSequence: 9,
-		Expiry:        300,
+		ValidAfter:    200,
+		ValidBefore:   300,
 		GasTipCap:     big.NewInt(6),
 		GasFeeCap:     big.NewInt(10),
 		GasLimit:      60000,
@@ -317,6 +348,84 @@ func TestEip8130TxJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEip8130TxJSONRequiresValidityBounds(t *testing.T) {
+	tx := NewTx(&Eip8130Tx{
+		ChainID:       big.NewInt(8453),
+		NonceKey:      big.NewInt(0),
+		NonceSequence: 7,
+		ValidAfter:    100,
+		ValidBefore:   200,
+		GasTipCap:     big.NewInt(1),
+		GasFeeCap:     big.NewInt(2),
+		GasLimit:      21000,
+	})
+	data, err := tx.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	var validBody map[string]json.RawMessage
+	if err := json.Unmarshal(top["tx"], &validBody); err != nil {
+		t.Fatalf("unmarshal tx body: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		mutate      func(map[string]json.RawMessage)
+		wantMissing string
+	}{
+		{
+			name: "validAfter",
+			mutate: func(body map[string]json.RawMessage) {
+				delete(body, "validAfter")
+			},
+			wantMissing: "validAfter",
+		},
+		{
+			name: "validBefore",
+			mutate: func(body map[string]json.RawMessage) {
+				delete(body, "validBefore")
+			},
+			wantMissing: "validBefore",
+		},
+		{
+			name: "legacy expiry",
+			mutate: func(body map[string]json.RawMessage) {
+				delete(body, "validAfter")
+				delete(body, "validBefore")
+				body["expiry"] = json.RawMessage(`200`)
+			},
+			wantMissing: "validAfter",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := make(map[string]json.RawMessage, len(validBody))
+			for key, value := range validBody {
+				body[key] = value
+			}
+			tt.mutate(body)
+			bodyJSON, err := json.Marshal(body)
+			if err != nil {
+				t.Fatalf("marshal tx body: %v", err)
+			}
+			top["tx"] = bodyJSON
+			input, err := json.Marshal(top)
+			if err != nil {
+				t.Fatalf("marshal input: %v", err)
+			}
+			var got Transaction
+			err = got.UnmarshalJSON(input)
+			if err == nil || !strings.Contains(err.Error(), "missing required field '"+tt.wantMissing+"'") {
+				t.Fatalf("want missing-%s error, got %v", tt.wantMissing, err)
+			}
+		})
+	}
+}
+
 // TestEip8130TxCopyDeepCopy verifies that copy() produces a fully independent
 // clone: mutating every inner byte slice, nested body and big.Int of the original
 // after the copy must not affect the copy, and the body pointers must differ.
@@ -326,7 +435,8 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 		Sender:        ptrAddr(0x11),
 		NonceKey:      big.NewInt(3),
 		NonceSequence: 7,
-		Expiry:        100,
+		ValidAfter:    50,
+		ValidBefore:   100,
 		GasTipCap:     big.NewInt(1),
 		GasFeeCap:     big.NewInt(2),
 		GasLimit:      1000000,
@@ -405,7 +515,8 @@ func TestEip8130TxJSONVariants(t *testing.T) {
 			Sender:        ptrAddr(0x11),
 			NonceKey:      big.NewInt(0),
 			NonceSequence: 7,
-			Expiry:        100,
+			ValidAfter:    50,
+			ValidBefore:   100,
 			GasTipCap:     big.NewInt(1),
 			GasFeeCap:     big.NewInt(2),
 			GasLimit:      1000000,
@@ -505,7 +616,8 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 			"sender":"0x0000000000000000000000000000000000000011",
 			"nonceKey":"0x0",
 			"nonceSequence":7,
-			"expiry":0,
+			"validAfter":0,
+			"validBefore":0,
 			"maxPriorityFeePerGas":"0x3b9aca00",
 			"maxFeePerGas":"0x12a05f200",
 			"gasLimit":1000000,
@@ -590,6 +702,8 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 		"chainId":              `8453`,    // JSON number
 		"nonceKey":             `"0x0"`,   // hex quantity
 		"nonceSequence":        `7`,       // JSON number
+		"validAfter":           `0`,       // JSON number
+		"validBefore":          `0`,       // JSON number
 		"gasLimit":             `1000000`, // JSON number
 		"maxPriorityFeePerGas": `"0x3b9aca00"`,
 		"maxFeePerGas":         `"0x12a05f200"`,

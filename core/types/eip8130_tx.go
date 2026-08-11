@@ -32,7 +32,8 @@ type Eip8130Tx struct {
 	Sender         *common.Address `rlp:"nil"` // nil means the empty EOA path
 	NonceKey       *big.Int
 	NonceSequence  uint64
-	Expiry         uint64
+	ValidAfter     uint64   // inclusive lower bound in Unix milliseconds; zero disables it
+	ValidBefore    uint64   // exclusive upper bound in Unix milliseconds; zero disables it
 	GasTipCap      *big.Int // a.k.a. maxPriorityFeePerGas
 	GasFeeCap      *big.Int // a.k.a. maxFeePerGas
 	GasLimit       uint64
@@ -49,7 +50,8 @@ func (tx *Eip8130Tx) copy() TxData {
 	cpy := &Eip8130Tx{
 		Sender:         copyAddressPtr(tx.Sender),
 		NonceSequence:  tx.NonceSequence,
-		Expiry:         tx.Expiry,
+		ValidAfter:     tx.ValidAfter,
+		ValidBefore:    tx.ValidBefore,
 		GasLimit:       tx.GasLimit,
 		AccountChanges: copyAccountChanges(tx.AccountChanges),
 		Calls:          copyCalls(tx.Calls),
