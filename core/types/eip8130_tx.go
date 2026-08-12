@@ -182,23 +182,22 @@ func (a AccountChange) copy() AccountChange {
 			InitialActors: actors,
 		}}
 	case a.ConfigChange != nil:
-		var changes []ActorChange
-		if a.ConfigChange.ActorChanges != nil {
-			changes = make([]ActorChange, len(a.ConfigChange.ActorChanges))
-			for i, c := range a.ConfigChange.ActorChanges {
-				changes[i] = ActorChange{
+		var changes []SignedChange
+		if a.ConfigChange.Changes != nil {
+			changes = make([]SignedChange, len(a.ConfigChange.Changes))
+			for i, c := range a.ConfigChange.Changes {
+				changes[i] = SignedChange{
 					ChangeType: c.ChangeType,
-					ActorID:    c.ActorID,
-					Data:       common.CopyBytes(c.Data),
+					Payload:    common.CopyBytes(c.Payload),
 				}
 			}
 		}
 
-		return AccountChange{ConfigChange: &ConfigChange{
-			ChainID:      a.ConfigChange.ChainID,
-			Sequence:     a.ConfigChange.Sequence,
-			ActorChanges: changes,
-			Auth:         common.CopyBytes(a.ConfigChange.Auth),
+		return AccountChange{ConfigChange: &SignedAccountChanges{
+			Channel:   a.ConfigChange.Channel,
+			Sequence:  a.ConfigChange.Sequence,
+			Changes:   changes,
+			Signature: common.CopyBytes(a.ConfigChange.Signature),
 		}}
 	case a.Delegation != nil:
 		return AccountChange{Delegation: &Delegation{Target: a.Delegation.Target}}

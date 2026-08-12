@@ -35,53 +35,149 @@ const (
 	accountChangeTypeDelegation = 0x02
 )
 
-// ActorChangeType is the operation performed by an ActorChange. The value is the
-// on-wire op byte; in RLP it encodes as a bare uint, in JSON as a string.
-type ActorChangeType uint8
+// ChangeType is the operation performed by a SignedChange. The value is the
+// on-wire operation byte; in RLP it encodes as a bare uint, and in JSON as the
+// Rust enum variant name.
+type ChangeType uint8
 
 const (
-	ActorChangeAuthorize ActorChangeType = 0x01
-	ActorChangeRevoke    ActorChangeType = 0x02
+	ChangeTypeAuthorizeActor      ChangeType = 0x00
+	ChangeTypeRevokeActor         ChangeType = 0x01
+	ChangeTypeIncrementLocalEpoch ChangeType = 0x02
+	ChangeTypeLock                ChangeType = 0x03
+	ChangeTypeUnlock              ChangeType = 0x04
 )
 
-func (t ActorChangeType) MarshalJSON() ([]byte, error) {
-	switch t {
-	case ActorChangeAuthorize:
-		return []byte(`"Authorize"`), nil
-	case ActorChangeRevoke:
-		return []byte(`"Revoke"`), nil
-	default:
-		return nil, fmt.Errorf("eip8130: invalid actor change type %d", uint8(t))
-	}
+func (t ChangeType) valid() bool {
+	return t >= ChangeTypeAuthorizeActor && t <= ChangeTypeUnlock
 }
 
-func (t *ActorChangeType) UnmarshalJSON(input []byte) error {
-	switch string(input) {
-	case `"Authorize"`:
-		*t = ActorChangeAuthorize
-	case `"Revoke"`:
-		*t = ActorChangeRevoke
+func (t ChangeType) MarshalJSON() ([]byte, error) {
+	var name string
+	switch t {
+	case ChangeTypeAuthorizeActor:
+		name = "AuthorizeActor"
+	case ChangeTypeRevokeActor:
+		name = "RevokeActor"
+	case ChangeTypeIncrementLocalEpoch:
+		name = "IncrementLocalEpoch"
+	case ChangeTypeLock:
+		name = "Lock"
+	case ChangeTypeUnlock:
+		name = "Unlock"
 	default:
-		return fmt.Errorf("eip8130: invalid actor change type %s", input)
+		return nil, fmt.Errorf("eip8130: invalid change type %d", uint8(t))
+	}
+	return json.Marshal(name)
+}
+
+func (t *ChangeType) UnmarshalJSON(input []byte) error {
+	var name string
+	if err := json.Unmarshal(input, &name); err != nil {
+		return err
+	}
+	switch name {
+	case "AuthorizeActor":
+		*t = ChangeTypeAuthorizeActor
+	case "RevokeActor":
+		*t = ChangeTypeRevokeActor
+	case "IncrementLocalEpoch":
+		*t = ChangeTypeIncrementLocalEpoch
+	case "Lock":
+		*t = ChangeTypeLock
+	case "Unlock":
+		*t = ChangeTypeUnlock
+	default:
+		return fmt.Errorf("eip8130: invalid change type %q", name)
 	}
 	return nil
 }
 
-// DecodeRLP reads the op byte and rejects any value other than Authorize (0x01)
-// or Revoke (0x02), matching the Rust strict decode (ActorChangeType::from_op_byte).
-// Without this, the derived uint8 decoder would accept any byte 0x00..0xff.
-func (t *ActorChangeType) DecodeRLP(s *rlp.Stream) error {
+// EncodeRLP writes the operation byte as a bare RLP uint and rejects values that
+// cannot be represented by the finalized Rust enum.
+func (t ChangeType) EncodeRLP(w io.Writer) error {
+	if !t.valid() {
+		return fmt.Errorf("eip8130: invalid change type byte 0x%x", uint8(t))
+	}
+	return rlp.Encode(w, uint8(t))
+}
+
+// DecodeRLP reads an operation byte and rejects values outside the finalized
+// ChangeType enum.
+func (t *ChangeType) DecodeRLP(s *rlp.Stream) error {
 	b, err := s.Uint8()
 	if err != nil {
 		return err
 	}
-	switch ActorChangeType(b) {
-	case ActorChangeAuthorize, ActorChangeRevoke:
-		*t = ActorChangeType(b)
-		return nil
-	default:
-		return fmt.Errorf("eip8130: invalid actor change type byte 0x%x", b)
+	decoded := ChangeType(b)
+	if !decoded.valid() {
+		return fmt.Errorf("eip8130: invalid change type byte 0x%x", b)
 	}
+	*t = decoded
+	return nil
+}
+
+// AccountChangeChannel selects the replay domain for SignedAccountChanges.
+// Local binds the current chain and uses epoch/sequence semantics; Multichain
+// binds chain ID zero and uses a monotonic sequence.
+type AccountChangeChannel uint8
+
+const (
+	AccountChangeChannelLocal      AccountChangeChannel = 0x00
+	AccountChangeChannelMultichain AccountChangeChannel = 0x01
+)
+
+func (c AccountChangeChannel) valid() bool {
+	return c == AccountChangeChannelLocal || c == AccountChangeChannelMultichain
+}
+
+func (c AccountChangeChannel) MarshalJSON() ([]byte, error) {
+	switch c {
+	case AccountChangeChannelLocal:
+		return []byte(`"Local"`), nil
+	case AccountChangeChannelMultichain:
+		return []byte(`"Multichain"`), nil
+	default:
+		return nil, fmt.Errorf("eip8130: invalid account change channel %d", uint8(c))
+	}
+}
+
+func (c *AccountChangeChannel) UnmarshalJSON(input []byte) error {
+	var name string
+	if err := json.Unmarshal(input, &name); err != nil {
+		return err
+	}
+	switch name {
+	case "Local":
+		*c = AccountChangeChannelLocal
+	case "Multichain":
+		*c = AccountChangeChannelMultichain
+	default:
+		return fmt.Errorf("eip8130: invalid account change channel %q", name)
+	}
+	return nil
+}
+
+// EncodeRLP writes the channel byte as a bare RLP uint.
+func (c AccountChangeChannel) EncodeRLP(w io.Writer) error {
+	if !c.valid() {
+		return fmt.Errorf("eip8130: invalid account change channel byte 0x%x", uint8(c))
+	}
+	return rlp.Encode(w, uint8(c))
+}
+
+// DecodeRLP reads a channel byte and rejects values outside the finalized enum.
+func (c *AccountChangeChannel) DecodeRLP(s *rlp.Stream) error {
+	b, err := s.Uint8()
+	if err != nil {
+		return err
+	}
+	decoded := AccountChangeChannel(b)
+	if !decoded.valid() {
+		return fmt.Errorf("eip8130: invalid account change channel byte 0x%x", b)
+	}
+	*c = decoded
+	return nil
 }
 
 // InitialActor is an actor installed on a newly-created account. Wire form is
@@ -91,16 +187,36 @@ func (t *ActorChangeType) DecodeRLP(s *rlp.Stream) error {
 type InitialActor struct {
 	ActorID       common.Hash    `json:"actorId"`
 	Authenticator common.Address `json:"authenticator"`
-	Scope         uint8          `json:"scope"`
+	Scope         uint16         `json:"scope"`
 	PolicyData    hexutil.Bytes  `json:"policyData"`
 }
 
-// ActorChange is a single actor authorize/revoke operation inside a ConfigChange.
-// Wire form is rlp([changeType, actorId, data]); data is opaque at this layer.
-type ActorChange struct {
-	ChangeType ActorChangeType `json:"changeType"`
-	ActorID    common.Hash     `json:"actorId"`
-	Data       hexutil.Bytes   `json:"data"`
+// SignedChange is one operation in a SignedAccountChanges batch. Wire form is
+// rlp([changeType, payload]); payload is operation-specific ABI data and remains
+// opaque at the transaction codec layer.
+type SignedChange struct {
+	ChangeType ChangeType    `json:"changeType"`
+	Payload    hexutil.Bytes `json:"payload"`
+}
+
+// UnmarshalJSON keeps the Rust serde shape strict: both fields are required,
+// including an explicitly empty payload ("0x").
+func (c *SignedChange) UnmarshalJSON(input []byte) error {
+	var dec struct {
+		ChangeType *ChangeType    `json:"changeType"`
+		Payload    *hexutil.Bytes `json:"payload"`
+	}
+	if err := json.Unmarshal(input, &dec); err != nil {
+		return err
+	}
+	if dec.ChangeType == nil {
+		return errors.New("eip8130: missing required field 'changeType' in signed change")
+	}
+	if dec.Payload == nil {
+		return errors.New("eip8130: missing required field 'payload' in signed change")
+	}
+	*c = SignedChange{ChangeType: *dec.ChangeType, Payload: *dec.Payload}
+	return nil
 }
 
 // CreateEntry is the body of an AccountChange create entry. Wire form is
@@ -111,13 +227,45 @@ type CreateEntry struct {
 	InitialActors []InitialActor `json:"initialActors"`
 }
 
-// ConfigChange is the body of an AccountChange config-change entry. Wire form is
-// rlp([chainId, sequence, [ActorChange, ...], auth]).
-type ConfigChange struct {
-	ChainID      uint64        `json:"chainId"`
-	Sequence     uint64        `json:"sequence"`
-	ActorChanges []ActorChange `json:"actorChanges"`
-	Auth         hexutil.Bytes `json:"auth"`
+// SignedAccountChanges is the body of an AccountChange config-change entry.
+// Wire form is rlp([channel, sequence, [SignedChange, ...], signature]).
+type SignedAccountChanges struct {
+	Channel   AccountChangeChannel `json:"channel"`
+	Sequence  uint64               `json:"sequence"`
+	Changes   []SignedChange       `json:"changes"`
+	Signature hexutil.Bytes        `json:"signature"`
+}
+
+// UnmarshalJSON keeps the Rust serde shape strict. Pointer fields distinguish a
+// missing field from valid zero values such as Local, sequence zero, an empty
+// changes list, or an empty signature.
+func (c *SignedAccountChanges) UnmarshalJSON(input []byte) error {
+	var dec struct {
+		Channel   *AccountChangeChannel `json:"channel"`
+		Sequence  *uint64               `json:"sequence"`
+		Changes   *[]SignedChange       `json:"changes"`
+		Signature *hexutil.Bytes        `json:"signature"`
+	}
+	if err := json.Unmarshal(input, &dec); err != nil {
+		return err
+	}
+	switch {
+	case dec.Channel == nil:
+		return errors.New("eip8130: missing required field 'channel' in signed account changes")
+	case dec.Sequence == nil:
+		return errors.New("eip8130: missing required field 'sequence' in signed account changes")
+	case dec.Changes == nil:
+		return errors.New("eip8130: missing required field 'changes' in signed account changes")
+	case dec.Signature == nil:
+		return errors.New("eip8130: missing required field 'signature' in signed account changes")
+	}
+	*c = SignedAccountChanges{
+		Channel:   *dec.Channel,
+		Sequence:  *dec.Sequence,
+		Changes:   *dec.Changes,
+		Signature: *dec.Signature,
+	}
+	return nil
 }
 
 // Delegation is the body of an AccountChange delegation entry. Wire form is
@@ -135,7 +283,7 @@ type Delegation struct {
 // discriminator ("create" / "configChange" / "delegation").
 type AccountChange struct {
 	Create       *CreateEntry
-	ConfigChange *ConfigChange
+	ConfigChange *SignedAccountChanges
 	Delegation   *Delegation
 }
 
@@ -159,8 +307,8 @@ func (a AccountChange) resolveBody() (typeByte byte, typ string, body interface{
 	if a.ConfigChange != nil {
 		n++
 		cpy := *a.ConfigChange
-		if cpy.ActorChanges == nil {
-			cpy.ActorChanges = []ActorChange{}
+		if cpy.Changes == nil {
+			cpy.Changes = []SignedChange{}
 		}
 		typeByte, typ, body = accountChangeTypeConfig, "configChange", &cpy
 	}
@@ -197,13 +345,16 @@ func (a AccountChange) EncodeRLP(w io.Writer) error {
 		if err := rlp.Encode(buf, b.InitialActors); err != nil {
 			return err
 		}
-	case *ConfigChange:
-		buf.WriteUint64(b.ChainID)
+	case *SignedAccountChanges:
+		if !b.Channel.valid() {
+			return fmt.Errorf("eip8130: invalid account change channel byte 0x%x", uint8(b.Channel))
+		}
+		buf.WriteUint64(uint64(b.Channel))
 		buf.WriteUint64(b.Sequence)
-		if err := rlp.Encode(buf, b.ActorChanges); err != nil {
+		if err := rlp.Encode(buf, b.Changes); err != nil {
 			return err
 		}
-		buf.WriteBytes(b.Auth)
+		buf.WriteBytes(b.Signature)
 	case *Delegation:
 		buf.WriteBytes(b.Target[:])
 	default:
@@ -226,6 +377,7 @@ func (a *AccountChange) DecodeRLP(s *rlp.Stream) error {
 	if err != nil {
 		return err
 	}
+	*a = AccountChange{}
 
 	switch typeByte {
 	case accountChangeTypeCreate:
@@ -243,21 +395,21 @@ func (a *AccountChange) DecodeRLP(s *rlp.Stream) error {
 		}
 		a.Create = body
 	case accountChangeTypeConfig:
-		body := new(ConfigChange)
-		if err := s.Decode(&body.ChainID); err != nil {
+		body := new(SignedAccountChanges)
+		if err := s.Decode(&body.Channel); err != nil {
 			return err
 		}
 		if err := s.Decode(&body.Sequence); err != nil {
 			return err
 		}
-		if err := s.Decode(&body.ActorChanges); err != nil {
+		if err := s.Decode(&body.Changes); err != nil {
 			return err
 		}
-		var auth []byte
-		if err := s.Decode(&auth); err != nil {
+		var signature []byte
+		if err := s.Decode(&signature); err != nil {
 			return err
 		}
-		body.Auth = auth
+		body.Signature = signature
 		a.ConfigChange = body
 	case accountChangeTypeDelegation:
 		body := new(Delegation)
@@ -299,12 +451,13 @@ func (a *AccountChange) UnmarshalJSON(input []byte) error {
 	if err := json.Unmarshal(input, &tag); err != nil {
 		return err
 	}
+	*a = AccountChange{}
 	switch tag.Type {
 	case "create":
 		a.Create = new(CreateEntry)
 		return json.Unmarshal(input, a.Create)
 	case "configChange":
-		a.ConfigChange = new(ConfigChange)
+		a.ConfigChange = new(SignedAccountChanges)
 		return json.Unmarshal(input, a.ConfigChange)
 	case "delegation":
 		a.Delegation = new(Delegation)
