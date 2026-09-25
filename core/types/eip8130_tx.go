@@ -125,8 +125,8 @@ func (tx *Eip8130Tx) setSignatureValues(chainID, v, r, s *big.Int) {
 	tx.ChainID = chainID
 }
 
-// copyCalls deep-copies the call phases, including each call's Data slice, so the
-// copy shares no backing array with the original.
+// copyCalls deep-copies the call phases, including each call's Value and Data, so
+// the copy shares no memory with the original.
 func copyCalls(calls [][]Call) [][]Call {
 	if calls == nil {
 		return nil
@@ -138,7 +138,11 @@ func copyCalls(calls [][]Call) [][]Call {
 		}
 		cpyPhase := make([]Call, len(phase))
 		for j, c := range phase {
-			cpyPhase[j] = Call{To: c.To, Data: common.CopyBytes(c.Data)}
+			var value *big.Int
+			if c.Value != nil {
+				value = new(big.Int).Set(c.Value)
+			}
+			cpyPhase[j] = Call{To: c.To, Value: value, Data: common.CopyBytes(c.Data)}
 		}
 		cpy[i] = cpyPhase
 	}

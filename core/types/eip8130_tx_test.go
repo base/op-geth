@@ -134,7 +134,7 @@ func TestEip8130TxBinaryRoundTrip(t *testing.T) {
 					{Delegation: &Delegation{Target: common.Address{0xdd}}},
 				},
 				Calls: [][]Call{
-					{{To: common.Address{0xaa}, Data: []byte{0xde, 0xad, 0xbe, 0xef}}},
+					{{To: common.Address{0xaa}, Value: big.NewInt(1), Data: []byte{0xde, 0xad, 0xbe, 0xef}}},
 				},
 				Payer:      nil,
 				SenderAuth: append(bytes.Repeat([]byte{0xee}, 20), []byte{0x08}...),
@@ -208,8 +208,8 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 			calls: [][]Call{
 				{{To: common.Address{0xaa}, Data: []byte{0xde, 0xad}}},
 				{
-					{To: common.Address{0xbb}, Data: []byte{0xbe, 0xef}},
-					{To: common.Address{0xcc}, Data: []byte{0x01}},
+					{To: common.Address{0xbb}, Value: new(big.Int).Lsh(big.NewInt(1), 255), Data: []byte{0xbe, 0xef}},
+					{To: common.Address{0xcc}, Value: big.NewInt(1_000_000_000_000_000_000), Data: []byte{0x01}},
 				},
 			},
 		},
@@ -283,6 +283,78 @@ func TestEip8130AccountChangeWireVectors(t *testing.T) {
 			t.Fatalf("decoded signed account changes mismatch: %+v", decoded.ConfigChange)
 		}
 	})
+}
+
+// TestEip8130CallWireVector locks the rlp([to, value, data]) call layout shared
+// with base-reth and rejects the legacy value-less rlp([to, data]) layout.
+func TestEip8130CallWireVector(t *testing.T) {
+	to := common.Address{0xaa}
+	data := []byte{0xde, 0xad, 0xbe, 0xef}
+	want := common.FromHex("0xdd94aa" + strings.Repeat("00", 19) + "821234" + "84deadbeef")
+
+	got, err := rlp.EncodeToBytes(Call{To: to, Value: big.NewInt(0x1234), Data: data})
+	if err != nil {
+		t.Fatalf("encode call: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("call wire mismatch:\n got %x\nwant %x", got, want)
+	}
+	var decoded Call
+	if err := rlp.DecodeBytes(want, &decoded); err != nil {
+		t.Fatalf("decode call: %v", err)
+	}
+	if decoded.To != to || decoded.Value.Cmp(big.NewInt(0x1234)) != 0 || !bytes.Equal(decoded.Data, data) {
+		t.Fatalf("decoded call mismatch: %+v", decoded)
+	}
+
+	nilValue, err := rlp.EncodeToBytes(Call{To: to, Data: data})
+	if err != nil {
+		t.Fatalf("encode nil-value call: %v", err)
+	}
+	zeroValue, err := rlp.EncodeToBytes(Call{To: to, Value: new(big.Int), Data: data})
+	if err != nil {
+		t.Fatalf("encode zero-value call: %v", err)
+	}
+	if !bytes.Equal(nilValue, zeroValue) {
+		t.Fatalf("nil value must encode as zero:\n got %x\nwant %x", nilValue, zeroValue)
+	}
+
+	legacy, err := rlp.EncodeToBytes([]interface{}{to, data})
+	if err != nil {
+		t.Fatalf("encode legacy call: %v", err)
+	}
+	if err := rlp.DecodeBytes(legacy, &decoded); err == nil {
+		t.Fatal("legacy [to, data] call layout decoded successfully")
+	}
+}
+
+// TestEip8130CallJSONValue asserts value is a hex quantity, a nil value
+// marshals as "0x0", and a missing value decodes to zero like base-reth's
+// serde(default).
+func TestEip8130CallJSONValue(t *testing.T) {
+	out, err := json.Marshal(Call{To: common.Address{0xaa}, Data: []byte{0x01}})
+	if err != nil {
+		t.Fatalf("marshal nil-value call: %v", err)
+	}
+	want := `{"to":"0xaa00000000000000000000000000000000000000","value":"0x0","data":"0x01"}`
+	if string(out) != want {
+		t.Fatalf("nil-value call JSON = %s, want %s", out, want)
+	}
+
+	var decoded Call
+	if err := json.Unmarshal([]byte(`{"to":"0xaa00000000000000000000000000000000000000","data":"0x01"}`), &decoded); err != nil {
+		t.Fatalf("unmarshal value-less call: %v", err)
+	}
+	if decoded.Value == nil || decoded.Value.Sign() != 0 {
+		t.Fatalf("missing value = %v, want 0", decoded.Value)
+	}
+
+	if err := json.Unmarshal([]byte(`{"to":"0xaa00000000000000000000000000000000000000","value":"0x1234","data":"0x01"}`), &decoded); err != nil {
+		t.Fatalf("unmarshal call: %v", err)
+	}
+	if decoded.Value.Cmp(big.NewInt(0x1234)) != 0 {
+		t.Fatalf("value = %v, want 0x1234", decoded.Value)
+	}
 }
 
 func TestEip8130SignedChangeDiscriminants(t *testing.T) {
@@ -427,7 +499,7 @@ func TestEip8130TxJSONRoundTrip(t *testing.T) {
 			{Delegation: &Delegation{Target: common.Address{0xdd}}},
 		},
 		Calls: [][]Call{
-			{{To: common.Address{0xaa}, Data: []byte{0xde, 0xad, 0xbe, 0xef}}},
+			{{To: common.Address{0xaa}, Value: big.NewInt(0x1234), Data: []byte{0xde, 0xad, 0xbe, 0xef}}},
 		},
 		Payer:      ptrAddr(0x33),
 		SenderAuth: append(bytes.Repeat([]byte{0xcc}, 20), []byte{0x04, 0x05}...),
@@ -556,7 +628,7 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 			}},
 			{Delegation: &Delegation{Target: common.Address{0xdd}}},
 		},
-		Calls:      [][]Call{{{To: common.Address{0xaa}, Data: []byte{0xde, 0xad}}}},
+		Calls:      [][]Call{{{To: common.Address{0xaa}, Value: big.NewInt(5), Data: []byte{0xde, 0xad}}}},
 		Metadata:   []byte{0x01, 0x02},
 		Payer:      ptrAddr(0x55),
 		SenderAuth: []byte{0xee},
@@ -592,6 +664,7 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 	orig.AccountChanges[0].Create.InitialActors[0].PolicyData[0] = 0xff
 	orig.AccountChanges[1].ConfigChange.Changes[0].Payload[0] = 0xff
 	orig.AccountChanges[1].ConfigChange.Signature[0] = 0xff
+	orig.Calls[0][0].Value.SetInt64(5555)
 	orig.Calls[0][0].Data[0] = 0xff
 	orig.Metadata[0] = 0xff
 	orig.SenderAuth[0] = 0xff
@@ -775,7 +848,7 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 			"maxFeePerGas":"0x12a05f200",
 			"gasLimit":1000000,
 			"accountChanges":[{"type":"delegation","target":"0x00000000000000000000000000000000000000dd"}],
-			"calls":[[{"to":"0x00000000000000000000000000000000000000aa","data":"0xdeadbeef"}]],
+			"calls":[[{"to":"0x00000000000000000000000000000000000000aa","value":"0x1234","data":"0xdeadbeef"}]],
 			"metadata":"0x",
 			"payer":null
 		},
@@ -808,7 +881,8 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 		t.Fatalf("calls not decoded: %+v", inner.Calls)
 	}
 	wantTo := common.HexToAddress("0x00000000000000000000000000000000000000aa")
-	if got := inner.Calls[0][0]; got.To != wantTo || !bytes.Equal(got.Data, []byte{0xde, 0xad, 0xbe, 0xef}) {
+	if got := inner.Calls[0][0]; got.To != wantTo || got.Value.Cmp(big.NewInt(0x1234)) != 0 ||
+		!bytes.Equal(got.Data, []byte{0xde, 0xad, 0xbe, 0xef}) {
 		t.Fatalf("call mismatch: %+v", got)
 	}
 
@@ -884,6 +958,7 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 	}
 	if len(calls) != 1 || len(calls[0]) != 1 ||
 		string(calls[0][0]["to"]) != `"0x00000000000000000000000000000000000000aa"` ||
+		string(calls[0][0]["value"]) != `"0x1234"` ||
 		string(calls[0][0]["data"]) != `"0xdeadbeef"` {
 		t.Fatalf("calls shape mismatch: %s", body["calls"])
 	}
