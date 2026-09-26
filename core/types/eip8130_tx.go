@@ -18,6 +18,8 @@ package types
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -32,17 +34,124 @@ type Eip8130Tx struct {
 	Sender         *common.Address `rlp:"nil"` // nil means the empty EOA path
 	NonceKey       *big.Int
 	NonceSequence  uint64
-	ValidAfter     uint64   // inclusive lower bound in Unix milliseconds; zero disables it
-	ValidBefore    uint64   // exclusive upper bound in Unix milliseconds; zero disables it
+	ValidAfter     uint64   // inclusive lower bound in Unix seconds or milliseconds; zero disables it
+	ValidBefore    uint64   // inclusive upper bound in Unix seconds or milliseconds; zero disables it
 	GasTipCap      *big.Int // a.k.a. maxPriorityFeePerGas
 	GasFeeCap      *big.Int // a.k.a. maxFeePerGas
 	GasLimit       uint64
 	AccountChanges []AccountChange // account-mutation entries applied before calls execute
 	Calls          [][]Call        // calls grouped into phases
 	Metadata       []byte          // opaque attribution bytes; not interpreted by the protocol
-	Payer          *common.Address `rlp:"nil"` // nil means self-pay
+	Payer          *common.Address // nil means self-pay; the zero address means open payer mode
 	SenderAuth     []byte
 	PayerAuth      []byte
+}
+
+// eip8130TxRLP is the wire layout of Eip8130Tx. It differs from Eip8130Tx only
+// in the payer encoding, which has three forms instead of rlp:"nil"'s two.
+type eip8130TxRLP struct {
+	ChainID        *big.Int
+	Sender         *common.Address `rlp:"nil"`
+	NonceKey       *big.Int
+	NonceSequence  uint64
+	ValidAfter     uint64
+	ValidBefore    uint64
+	GasTipCap      *big.Int
+	GasFeeCap      *big.Int
+	GasLimit       uint64
+	AccountChanges []AccountChange
+	Calls          [][]Call
+	Metadata       []byte
+	Payer          eip8130Payer
+	SenderAuth     []byte
+	PayerAuth      []byte
+}
+
+// eip8130Payer encodes the payer as an empty string for self-pay, the single
+// byte 0x00 for open payer mode (the zero address), and otherwise the 20-byte
+// address. A 20-byte zero address is rejected so open payer mode has a single
+// encoding.
+type eip8130Payer struct {
+	addr *common.Address
+}
+
+func (p eip8130Payer) EncodeRLP(w io.Writer) error {
+	switch {
+	case p.addr == nil:
+		return rlp.Encode(w, []byte{})
+	case *p.addr == (common.Address{}):
+		return rlp.Encode(w, []byte{0x00})
+	default:
+		return rlp.Encode(w, p.addr[:])
+	}
+}
+
+func (p *eip8130Payer) DecodeRLP(s *rlp.Stream) error {
+	raw, err := s.Bytes()
+	if err != nil {
+		return err
+	}
+	switch {
+	case len(raw) == 0:
+		p.addr = nil
+	case len(raw) == 1 && raw[0] == 0x00:
+		p.addr = new(common.Address)
+	case len(raw) == common.AddressLength && common.BytesToAddress(raw) != (common.Address{}):
+		addr := common.BytesToAddress(raw)
+		p.addr = &addr
+	default:
+		return errors.New("eip8130: invalid payer encoding")
+	}
+	return nil
+}
+
+// EncodeRLP implements rlp.Encoder. Transaction.Hash RLP-encodes the inner
+// transaction directly, so the payer encoding must live here rather than only in
+// encode.
+func (tx *Eip8130Tx) EncodeRLP(w io.Writer) error {
+	return rlp.Encode(w, &eip8130TxRLP{
+		ChainID:        tx.ChainID,
+		Sender:         tx.Sender,
+		NonceKey:       tx.NonceKey,
+		NonceSequence:  tx.NonceSequence,
+		ValidAfter:     tx.ValidAfter,
+		ValidBefore:    tx.ValidBefore,
+		GasTipCap:      tx.GasTipCap,
+		GasFeeCap:      tx.GasFeeCap,
+		GasLimit:       tx.GasLimit,
+		AccountChanges: tx.AccountChanges,
+		Calls:          tx.Calls,
+		Metadata:       tx.Metadata,
+		Payer:          eip8130Payer{addr: tx.Payer},
+		SenderAuth:     tx.SenderAuth,
+		PayerAuth:      tx.PayerAuth,
+	})
+}
+
+// DecodeRLP implements rlp.Decoder.
+func (tx *Eip8130Tx) DecodeRLP(s *rlp.Stream) error {
+	var dec eip8130TxRLP
+	if err := s.Decode(&dec); err != nil {
+		return err
+	}
+	*tx = Eip8130Tx{
+		ChainID:        dec.ChainID,
+		Sender:         dec.Sender,
+		NonceKey:       dec.NonceKey,
+		NonceSequence:  dec.NonceSequence,
+		ValidAfter:     dec.ValidAfter,
+		ValidBefore:    dec.ValidBefore,
+		GasTipCap:      dec.GasTipCap,
+		GasFeeCap:      dec.GasFeeCap,
+		GasLimit:       dec.GasLimit,
+		AccountChanges: dec.AccountChanges,
+		Calls:          dec.Calls,
+		Metadata:       dec.Metadata,
+		Payer:          dec.Payer.addr,
+		SenderAuth:     dec.SenderAuth,
+		PayerAuth:      dec.PayerAuth,
+	}
+	return nil
 }
 
 // copy creates a deep copy of the transaction data and initializes all fields.
@@ -150,64 +259,18 @@ func copyCalls(calls [][]Call) [][]Call {
 }
 
 // copyAccountChanges deep-copies the account-change entries, cloning the body
-// pointers and every inner slice so the copy cannot alias the original.
+// pointers so the copy cannot alias the original.
 func copyAccountChanges(changes []AccountChange) []AccountChange {
 	if changes == nil {
 		return nil
 	}
 	cpy := make([]AccountChange, len(changes))
 	for i, ac := range changes {
-		cpy[i] = ac.copy()
+		if ac.Delegation != nil {
+			cpy[i] = AccountChange{Delegation: &Delegation{Target: ac.Delegation.Target}}
+		}
 	}
 	return cpy
-}
-
-// copy returns a deep copy of the entry: the set body pointer and all of its
-// inner slices are cloned so neither the copy nor the original aliases the other.
-func (a AccountChange) copy() AccountChange {
-	switch {
-	case a.Create != nil:
-		var actors []InitialActor
-		if a.Create.InitialActors != nil {
-			actors = make([]InitialActor, len(a.Create.InitialActors))
-			for i, ia := range a.Create.InitialActors {
-				actors[i] = InitialActor{
-					ActorID:       ia.ActorID,
-					Authenticator: ia.Authenticator,
-					Scope:         ia.Scope,
-					PolicyData:    common.CopyBytes(ia.PolicyData),
-				}
-			}
-		}
-
-		return AccountChange{Create: &CreateEntry{
-			UserSalt:      a.Create.UserSalt,
-			Code:          common.CopyBytes(a.Create.Code),
-			InitialActors: actors,
-		}}
-	case a.ConfigChange != nil:
-		var changes []SignedChange
-		if a.ConfigChange.Changes != nil {
-			changes = make([]SignedChange, len(a.ConfigChange.Changes))
-			for i, c := range a.ConfigChange.Changes {
-				changes[i] = SignedChange{
-					ChangeType: c.ChangeType,
-					Payload:    common.CopyBytes(c.Payload),
-				}
-			}
-		}
-
-		return AccountChange{ConfigChange: &SignedAccountChanges{
-			Channel:   a.ConfigChange.Channel,
-			Sequence:  a.ConfigChange.Sequence,
-			Changes:   changes,
-			Signature: common.CopyBytes(a.ConfigChange.Signature),
-		}}
-	case a.Delegation != nil:
-		return AccountChange{Delegation: &Delegation{Target: a.Delegation.Target}}
-	default:
-		return AccountChange{}
-	}
 }
 
 func (tx *Eip8130Tx) encode(b *bytes.Buffer) error {

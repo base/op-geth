@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -148,9 +149,8 @@ func TestEip8130TxBinaryRoundTrip(t *testing.T) {
 	}
 }
 
-// TestEip8130TxAccountChangesRoundTrip exercises every account_changes variant,
-// multi-phase calls and a mixed-variant transaction, asserting each survives a
-// binary round-trip byte-for-byte.
+// TestEip8130TxAccountChangesRoundTrip exercises delegation account changes and
+// multi-phase calls, asserting each survives a binary round-trip byte-for-byte.
 func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 	base := func() *Eip8130Tx {
 		return &Eip8130Tx{
@@ -164,27 +164,8 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 			SenderAuth:    bytes.Repeat([]byte{0xab}, 32),
 		}
 	}
-	create := AccountChange{Create: &CreateEntry{
-		UserSalt: common.Hash{0x22},
-		Code:     []byte{0x60, 0x80, 0x60, 0x40, 0x52},
-		InitialActors: []InitialActor{
-			{ActorID: common.Hash{0x33}, Authenticator: common.Address{0xbb}},
-			{ActorID: common.Hash{0x66}, Authenticator: common.Address{0xcc}, Scope: 0x1234, PolicyData: []byte{0xde, 0xad}},
-		},
-	}}
-	configChange := AccountChange{ConfigChange: &SignedAccountChanges{
-		Channel:  AccountChangeChannelLocal,
-		Sequence: 7,
-		Changes: []SignedChange{
-			{ChangeType: ChangeTypeAuthorizeActor, Payload: []byte{0xaa, 0xbb}},
-			{ChangeType: ChangeTypeRevokeActor, Payload: []byte{0xcc, 0xdd}},
-			{ChangeType: ChangeTypeIncrementLocalEpoch},
-			{ChangeType: ChangeTypeLock, Payload: []byte{0x00, 0x01}},
-			{ChangeType: ChangeTypeUnlock},
-		},
-		Signature: []byte{0xab, 0xcd},
-	}}
 	delegation := AccountChange{Delegation: &Delegation{Target: common.Address{0xdd}}}
+	clearDelegation := AccountChange{Delegation: &Delegation{}}
 
 	for _, tt := range []struct {
 		name           string
@@ -192,16 +173,12 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 		calls          [][]Call
 	}{
 		{
-			name:           "create",
-			accountChanges: []AccountChange{create},
-		},
-		{
-			name:           "signed config changes",
-			accountChanges: []AccountChange{configChange},
-		},
-		{
 			name:           "delegation",
 			accountChanges: []AccountChange{delegation},
+		},
+		{
+			name:           "clear delegation",
+			accountChanges: []AccountChange{clearDelegation},
 		},
 		{
 			name: "calls two phases",
@@ -214,8 +191,8 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name:           "mixed variants and calls",
-			accountChanges: []AccountChange{create, configChange, delegation},
+			name:           "delegation and calls",
+			accountChanges: []AccountChange{delegation},
 			calls: [][]Call{
 				{{To: common.Address{0xaa}, Data: []byte{0xde, 0xad, 0xbe, 0xef}}},
 			},
@@ -230,59 +207,36 @@ func TestEip8130TxAccountChangesRoundTrip(t *testing.T) {
 	}
 }
 
-// TestEip8130AccountChangeWireVectors locks the finalized Rust wire layout for
-// uint16 actor scopes and SignedAccountChanges.
-func TestEip8130AccountChangeWireVectors(t *testing.T) {
-	t.Run("uint16 initial actor scope", func(t *testing.T) {
-		actor := InitialActor{Scope: 0x1234}
-		got, err := rlp.EncodeToBytes(actor)
-		if err != nil {
-			t.Fatalf("encode initial actor: %v", err)
-		}
-		want := common.FromHex("0xf83aa0000000000000000000000000000000000000000000000000000000000000000094000000000000000000000000000000000000000082123480")
-		if !bytes.Equal(got, want) {
-			t.Fatalf("initial actor wire mismatch:\n got %x\nwant %x", got, want)
-		}
-		var decoded InitialActor
-		if err := rlp.DecodeBytes(want, &decoded); err != nil {
-			t.Fatalf("decode initial actor vector: %v", err)
-		}
-		if decoded.Scope != 0x1234 {
-			t.Fatalf("scope = 0x%x, want 0x1234", decoded.Scope)
-		}
-	})
+// TestEip8130AccountChangeWireVector locks the rlp([0x01, target]) delegation
+// layout shared with base-reth and rejects the removed Keystore type bytes.
+func TestEip8130AccountChangeWireVector(t *testing.T) {
+	change := AccountChange{Delegation: &Delegation{Target: common.Address{0xdd}}}
+	got, err := rlp.EncodeToBytes(change)
+	if err != nil {
+		t.Fatalf("encode delegation: %v", err)
+	}
+	want := common.FromHex("0xd60194dd" + strings.Repeat("00", 19))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("delegation wire mismatch:\n got %x\nwant %x", got, want)
+	}
+	var decoded AccountChange
+	if err := rlp.DecodeBytes(want, &decoded); err != nil {
+		t.Fatalf("decode delegation vector: %v", err)
+	}
+	if decoded.Delegation == nil || decoded.Delegation.Target != (common.Address{0xdd}) {
+		t.Fatalf("decoded delegation mismatch: %+v", decoded)
+	}
 
-	t.Run("signed account changes", func(t *testing.T) {
-		change := AccountChange{ConfigChange: &SignedAccountChanges{
-			Channel:  AccountChangeChannelMultichain,
-			Sequence: 7,
-			Changes: []SignedChange{{
-				ChangeType: ChangeTypeAuthorizeActor,
-				Payload:    []byte{0xaa, 0xbb},
-			}},
-			Signature: []byte{0xcc, 0xdd},
-		}}
-		got, err := rlp.EncodeToBytes(change)
+	for _, typeByte := range []uint8{0x00, 0x02} {
+		entry, err := rlp.EncodeToBytes([]interface{}{typeByte, common.Address{0xdd}})
 		if err != nil {
-			t.Fatalf("encode signed account changes: %v", err)
+			t.Fatalf("encode type byte 0x%x entry: %v", typeByte, err)
 		}
-		// rlp([config=1, multichain=1, 7, [[authorize=0, 0xaabb]], 0xccdd])
-		want := common.FromHex("0xcc010107c5c48082aabb82ccdd")
-		if !bytes.Equal(got, want) {
-			t.Fatalf("signed account changes wire mismatch:\n got %x\nwant %x", got, want)
+		if err := rlp.DecodeBytes(entry, &decoded); err == nil ||
+			!strings.Contains(err.Error(), "invalid account change type byte") {
+			t.Fatalf("type byte 0x%x: want invalid-type-byte error, got %v", typeByte, err)
 		}
-		var decoded AccountChange
-		if err := rlp.DecodeBytes(want, &decoded); err != nil {
-			t.Fatalf("decode signed account changes vector: %v", err)
-		}
-		if decoded.ConfigChange == nil ||
-			decoded.ConfigChange.Channel != AccountChangeChannelMultichain ||
-			len(decoded.ConfigChange.Changes) != 1 ||
-			decoded.ConfigChange.Changes[0].ChangeType != ChangeTypeAuthorizeActor ||
-			!bytes.Equal(decoded.ConfigChange.Changes[0].Payload, []byte{0xaa, 0xbb}) {
-			t.Fatalf("decoded signed account changes mismatch: %+v", decoded.ConfigChange)
-		}
-	})
+	}
 }
 
 // TestEip8130CallWireVector locks the rlp([to, value, data]) call layout shared
@@ -354,50 +308,6 @@ func TestEip8130CallJSONValue(t *testing.T) {
 	}
 	if decoded.Value.Cmp(big.NewInt(0x1234)) != 0 {
 		t.Fatalf("value = %v, want 0x1234", decoded.Value)
-	}
-}
-
-func TestEip8130SignedChangeDiscriminants(t *testing.T) {
-	for _, tt := range []struct {
-		changeType ChangeType
-		jsonName   string
-		rlpByte    byte
-	}{
-		{ChangeTypeAuthorizeActor, `"AuthorizeActor"`, 0x80},
-		{ChangeTypeRevokeActor, `"RevokeActor"`, 0x01},
-		{ChangeTypeIncrementLocalEpoch, `"IncrementLocalEpoch"`, 0x02},
-		{ChangeTypeLock, `"Lock"`, 0x03},
-		{ChangeTypeUnlock, `"Unlock"`, 0x04},
-	} {
-		data, err := json.Marshal(tt.changeType)
-		if err != nil {
-			t.Fatalf("marshal %v: %v", tt.changeType, err)
-		}
-		if string(data) != tt.jsonName {
-			t.Fatalf("change type %d JSON = %s, want %s", tt.changeType, data, tt.jsonName)
-		}
-		var decodedJSON ChangeType
-		if err := json.Unmarshal(data, &decodedJSON); err != nil {
-			t.Fatalf("unmarshal %s: %v", data, err)
-		}
-		if decodedJSON != tt.changeType {
-			t.Fatalf("decoded JSON change type = %d, want %d", decodedJSON, tt.changeType)
-		}
-
-		data, err = rlp.EncodeToBytes(tt.changeType)
-		if err != nil {
-			t.Fatalf("encode %v: %v", tt.changeType, err)
-		}
-		if !bytes.Equal(data, []byte{tt.rlpByte}) {
-			t.Fatalf("change type %d RLP = %x, want %x", tt.changeType, data, tt.rlpByte)
-		}
-		var decodedRLP ChangeType
-		if err := rlp.DecodeBytes(data, &decodedRLP); err != nil {
-			t.Fatalf("decode %x: %v", data, err)
-		}
-		if decodedRLP != tt.changeType {
-			t.Fatalf("decoded RLP change type = %d, want %d", decodedRLP, tt.changeType)
-		}
 	}
 }
 
@@ -501,6 +411,7 @@ func TestEip8130TxJSONRoundTrip(t *testing.T) {
 		Calls: [][]Call{
 			{{To: common.Address{0xaa}, Value: big.NewInt(0x1234), Data: []byte{0xde, 0xad, 0xbe, 0xef}}},
 		},
+		Metadata:   []byte{0xca, 0xfe},
 		Payer:      ptrAddr(0x33),
 		SenderAuth: append(bytes.Repeat([]byte{0xcc}, 20), []byte{0x04, 0x05}...),
 		PayerAuth:  append(bytes.Repeat([]byte{0xdd}, 20), []byte{0x06, 0x07}...),
@@ -615,17 +526,6 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 		GasFeeCap:     big.NewInt(2),
 		GasLimit:      1000000,
 		AccountChanges: []AccountChange{
-			{Create: &CreateEntry{
-				UserSalt:      common.Hash{0x22},
-				Code:          []byte{0x60, 0x80},
-				InitialActors: []InitialActor{{ActorID: common.Hash{0x33}, Authenticator: common.Address{0xbb}, Scope: 0x04, PolicyData: []byte{0xde, 0xad}}},
-			}},
-			{ConfigChange: &SignedAccountChanges{
-				Channel:   AccountChangeChannelMultichain,
-				Sequence:  7,
-				Changes:   []SignedChange{{ChangeType: ChangeTypeAuthorizeActor, Payload: []byte{0xaa, 0xbb}}},
-				Signature: []byte{0xab, 0xcd},
-			}},
 			{Delegation: &Delegation{Target: common.Address{0xdd}}},
 		},
 		Calls:      [][]Call{{{To: common.Address{0xaa}, Value: big.NewInt(5), Data: []byte{0xde, 0xad}}}},
@@ -638,13 +538,7 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 	cpy := orig.copy().(*Eip8130Tx)
 
 	// Body pointers must not alias.
-	if cpy.AccountChanges[0].Create == orig.AccountChanges[0].Create {
-		t.Fatal("Create body pointer aliases original")
-	}
-	if cpy.AccountChanges[1].ConfigChange == orig.AccountChanges[1].ConfigChange {
-		t.Fatal("ConfigChange body pointer aliases original")
-	}
-	if cpy.AccountChanges[2].Delegation == orig.AccountChanges[2].Delegation {
+	if cpy.AccountChanges[0].Delegation == orig.AccountChanges[0].Delegation {
 		t.Fatal("Delegation body pointer aliases original")
 	}
 
@@ -659,11 +553,7 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 	orig.NonceKey.SetInt64(8888)
 	orig.GasTipCap.SetInt64(7777)
 	orig.GasFeeCap.SetInt64(6666)
-	orig.AccountChanges[0].Create.Code[0] = 0xff
-	orig.AccountChanges[0].Create.InitialActors[0].ActorID[0] = 0xff
-	orig.AccountChanges[0].Create.InitialActors[0].PolicyData[0] = 0xff
-	orig.AccountChanges[1].ConfigChange.Changes[0].Payload[0] = 0xff
-	orig.AccountChanges[1].ConfigChange.Signature[0] = 0xff
+	orig.AccountChanges[0].Delegation.Target[0] = 0xff
 	orig.Calls[0][0].Value.SetInt64(5555)
 	orig.Calls[0][0].Data[0] = 0xff
 	orig.Metadata[0] = 0xff
@@ -679,152 +569,37 @@ func TestEip8130TxCopyDeepCopy(t *testing.T) {
 	}
 }
 
-// TestEip8130TxJSONVariants asserts the create and configChange account-change
-// variants survive a JSON round-trip byte-stably, that a non-empty Metadata
-// round-trips, and that nil nested slices marshal as [] (not null) to match the
-// Rust serde shape.
-func TestEip8130TxJSONVariants(t *testing.T) {
-	base := func() *Eip8130Tx {
-		return &Eip8130Tx{
-			ChainID:       big.NewInt(8453),
-			Sender:        ptrAddr(0x11),
-			NonceKey:      big.NewInt(0),
-			NonceSequence: 7,
-			ValidAfter:    50,
-			ValidBefore:   100,
-			GasTipCap:     big.NewInt(1),
-			GasFeeCap:     big.NewInt(2),
-			GasLimit:      1000000,
-			Metadata:      []byte{0xca, 0xfe},
-			SenderAuth:    bytes.Repeat([]byte{0xab}, 32),
-		}
-	}
-
-	for _, tt := range []struct {
-		name       string
-		change     AccountChange
-		emptyField string // nested slice field that must marshal as "[]"
-	}{
-		{
-			name: "create empty initial actors",
-			change: AccountChange{Create: &CreateEntry{
-				UserSalt: common.Hash{0x22},
-				Code:     []byte{0x60, 0x80},
-			}},
-			emptyField: "initialActors",
-		},
-		{
-			name: "config change empty changes",
-			change: AccountChange{ConfigChange: &SignedAccountChanges{
-				Channel:   AccountChangeChannelLocal,
-				Sequence:  7,
-				Signature: []byte{0xab, 0xcd},
-			}},
-			emptyField: "changes",
-		},
-		{
-			name: "config change with signed changes",
-			change: AccountChange{ConfigChange: &SignedAccountChanges{
-				Channel:  AccountChangeChannelMultichain,
-				Sequence: 7,
-				Changes: []SignedChange{
-					{ChangeType: ChangeTypeAuthorizeActor, Payload: []byte{0xaa, 0xbb}},
-				},
-				Signature: []byte{0xab, 0xcd},
-			}},
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			inner := base()
-			inner.AccountChanges = []AccountChange{tt.change}
-			tx := NewTx(inner)
-
-			data, err := tx.MarshalJSON()
-			if err != nil {
-				t.Fatalf("MarshalJSON: %v", err)
-			}
-
-			// Nil nested slice must serialize as [], not null.
-			if tt.emptyField != "" {
-				var top map[string]json.RawMessage
-				if err := json.Unmarshal(data, &top); err != nil {
-					t.Fatalf("unmarshal output: %v", err)
-				}
-				var body map[string]json.RawMessage
-				if err := json.Unmarshal(top["tx"], &body); err != nil {
-					t.Fatalf("unmarshal tx body: %v", err)
-				}
-				var changes []map[string]json.RawMessage
-				if err := json.Unmarshal(body["accountChanges"], &changes); err != nil {
-					t.Fatalf("unmarshal accountChanges: %v", err)
-				}
-				if got := string(changes[0][tt.emptyField]); got != "[]" {
-					t.Fatalf("%s = %s, want []", tt.emptyField, got)
-				}
-			}
-
-			// JSON must round-trip to the same binary encoding (covers Metadata).
-			var got Transaction
-			if err := got.UnmarshalJSON(data); err != nil {
-				t.Fatalf("UnmarshalJSON: %v", err)
-			}
-			want, _ := tx.MarshalBinary()
-			have, _ := got.MarshalBinary()
-			if !bytes.Equal(want, have) {
-				t.Fatalf("JSON round-trip not byte-exact:\n got %x\nwant %x", have, want)
-			}
-		})
-	}
-}
-
-func TestEip8130SignedAccountChangesJSONShape(t *testing.T) {
-	change := AccountChange{ConfigChange: &SignedAccountChanges{
-		Channel:  AccountChangeChannelMultichain,
-		Sequence: 7,
-		Changes: []SignedChange{{
-			ChangeType: ChangeTypeAuthorizeActor,
-			Payload:    []byte{0xaa, 0xbb},
-		}},
-		Signature: []byte{0xcc, 0xdd},
-	}}
-	data, err := json.Marshal(change)
+// TestEip8130AccountChangeJSON locks the delegation JSON shape and rejects the
+// removed Keystore variants and a missing target.
+func TestEip8130AccountChangeJSON(t *testing.T) {
+	data, err := json.Marshal(AccountChange{Delegation: &Delegation{Target: common.Address{0xdd}}})
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
 	}
-	for _, field := range []string{
-		`"type":"configChange"`,
-		`"channel":"Multichain"`,
-		`"sequence":7`,
-		`"changes":[`,
-		`"changeType":"AuthorizeActor"`,
-		`"payload":"0xaabb"`,
-		`"signature":"0xccdd"`,
-	} {
-		if !bytes.Contains(data, []byte(field)) {
-			t.Fatalf("JSON %s missing %s", data, field)
-		}
+	want := `{"type":"delegation","target":"0xdd00000000000000000000000000000000000000"}`
+	if string(data) != want {
+		t.Fatalf("delegation JSON = %s, want %s", data, want)
 	}
-	for _, legacyField := range []string{`"chainId"`, `"actorChanges"`, `"auth"`} {
-		if bytes.Contains(data, []byte(legacyField)) {
-			t.Fatalf("JSON %s contains legacy field %s", data, legacyField)
-		}
-	}
-
 	var decoded AccountChange
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("UnmarshalJSON: %v", err)
 	}
-	if decoded.ConfigChange == nil ||
-		decoded.ConfigChange.Channel != AccountChangeChannelMultichain ||
-		len(decoded.ConfigChange.Changes) != 1 ||
-		decoded.ConfigChange.Changes[0].ChangeType != ChangeTypeAuthorizeActor {
-		t.Fatalf("decoded JSON mismatch: %+v", decoded.ConfigChange)
+	if decoded.Delegation == nil || decoded.Delegation.Target != (common.Address{0xdd}) {
+		t.Fatalf("decoded delegation mismatch: %+v", decoded)
 	}
 
-	legacy := []byte(`{"type":"configChange","chainId":8453,"sequence":7,"actorChanges":[],"auth":"0x"}`)
-	if err := json.Unmarshal(legacy, &decoded); err == nil ||
-		!strings.Contains(err.Error(), "missing required field 'channel'") {
-		t.Fatalf("legacy config-change JSON: want missing-channel error, got %v", err)
+	for _, input := range []string{
+		`{"type":"create","userSalt":"0x00","code":"0x","initialActors":[]}`,
+		`{"type":"configChange","channel":"Local","sequence":0,"changes":[],"signature":"0x"}`,
+	} {
+		if err := json.Unmarshal([]byte(input), &decoded); err == nil ||
+			!strings.Contains(err.Error(), "unknown account change type") {
+			t.Fatalf("%s: want unknown-type error, got %v", input, err)
+		}
+	}
+	if err := json.Unmarshal([]byte(`{"type":"delegation"}`), &decoded); err == nil ||
+		!strings.Contains(err.Error(), "missing required field 'target'") {
+		t.Fatalf("delegation without target: want missing-target error, got %v", err)
 	}
 }
 
@@ -965,9 +740,9 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 }
 
 // TestEip8130AccountChangeRejectsMalformedRLP locks the strict-decode rejection
-// branches: unknown discriminants, trailing elements, and the legacy config
-// layout. Round-trip tests only exercise valid input, so these malformed-input
-// paths would otherwise be unguarded.
+// branches: unknown discriminants and trailing elements. Round-trip tests only
+// exercise valid input, so these malformed-input paths would otherwise be
+// unguarded.
 func TestEip8130AccountChangeRejectsMalformedRLP(t *testing.T) {
 	t.Run("unknown type byte", func(t *testing.T) {
 		// [0x03]: a well-formed one-element RLP list whose type byte is not a
@@ -980,7 +755,7 @@ func TestEip8130AccountChangeRejectsMalformedRLP(t *testing.T) {
 	})
 
 	t.Run("trailing elements", func(t *testing.T) {
-		// A delegation entry [0x02, target] with an extra trailing element must be
+		// A delegation entry [0x01, target] with an extra trailing element must be
 		// rejected: the list has to be fully consumed after the body fields.
 		body, err := rlp.EncodeToBytes([]interface{}{
 			uint8(accountChangeTypeDelegation),
@@ -997,68 +772,99 @@ func TestEip8130AccountChangeRejectsMalformedRLP(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid signed change op byte", func(t *testing.T) {
-		buf, err := rlp.EncodeToBytes(uint8(0x05))
-		if err != nil {
-			t.Fatalf("encode op byte: %v", err)
-		}
-		var op ChangeType
-		if err := rlp.DecodeBytes(buf, &op); err == nil ||
-			!strings.Contains(err.Error(), "invalid change type byte") {
-			t.Fatalf("want invalid-op-byte error, got %v", err)
-		}
-	})
-
-	t.Run("invalid account change channel byte", func(t *testing.T) {
-		buf, err := rlp.EncodeToBytes(uint8(0x02))
-		if err != nil {
-			t.Fatalf("encode channel byte: %v", err)
-		}
-		var channel AccountChangeChannel
-		if err := rlp.DecodeBytes(buf, &channel); err == nil ||
-			!strings.Contains(err.Error(), "invalid account change channel byte") {
-			t.Fatalf("want invalid-channel-byte error, got %v", err)
-		}
-	})
-
-	t.Run("legacy config change layout", func(t *testing.T) {
-		// Legacy: [type, chainId, sequence, actorChanges, auth]. The finalized
-		// decoder expects channel in the second position and must reject chainId.
-		legacy, err := rlp.EncodeToBytes([]interface{}{
-			uint8(accountChangeTypeConfig),
-			uint64(8453),
-			uint64(7),
-			[]SignedChange{},
-			[]byte{0xab, 0xcd},
-		})
-		if err != nil {
-			t.Fatalf("encode legacy config change: %v", err)
-		}
-		var change AccountChange
-		if err := rlp.DecodeBytes(legacy, &change); err == nil {
-			t.Fatal("want legacy config-change layout to be rejected")
-		}
-	})
 }
 
-// TestEip8130AccountChangeRequiresExactlyOneBody locks the tagged-union invariant:
-// encoding (RLP or JSON) an AccountChange with zero or multiple body pointers set
-// errors instead of silently preferring one.
-func TestEip8130AccountChangeRequiresExactlyOneBody(t *testing.T) {
-	cases := map[string]AccountChange{
-		"no body":    {},
-		"two bodies": {Create: &CreateEntry{}, Delegation: &Delegation{Target: common.Address{0xdd}}},
+// TestEip8130AccountChangeRequiresDelegation locks that encoding (RLP or JSON)
+// an AccountChange without a delegation body errors instead of emitting an
+// entry base-reth cannot decode.
+func TestEip8130AccountChangeRequiresDelegation(t *testing.T) {
+	var ac AccountChange
+	if _, err := rlp.EncodeToBytes(ac); err == nil ||
+		!strings.Contains(err.Error(), "must set a delegation") {
+		t.Fatalf("EncodeRLP: want missing-delegation error, got %v", err)
 	}
-	for name, ac := range cases {
-		t.Run(name, func(t *testing.T) {
-			if _, err := rlp.EncodeToBytes(ac); err == nil ||
-				!strings.Contains(err.Error(), "exactly one body") {
-				t.Fatalf("EncodeRLP: want exactly-one-body error, got %v", err)
+	if _, err := json.Marshal(ac); err == nil ||
+		!strings.Contains(err.Error(), "must set a delegation") {
+		t.Fatalf("MarshalJSON: want missing-delegation error, got %v", err)
+	}
+}
+
+// TestEip8130TxOpenPayer locks the three payer encodings shared with base-reth:
+// empty for self-pay, the single byte 0x00 for open payer mode (the zero
+// address), and the 20-byte address otherwise. A 20-byte zero address and other
+// lengths are rejected. It also checks Transaction.Hash, which RLP-encodes the
+// inner transaction directly, agrees with the 2718 encoding.
+func TestEip8130TxOpenPayer(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		payer *common.Address
+		want  []byte
+	}{
+		{"self-pay", nil, []byte{0x80}},
+		{"open payer", new(common.Address), []byte{0x00}},
+		{"named payer", ptrAddr(0x33), append([]byte{0x94, 0x33}, make([]byte, 19)...)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := rlp.EncodeToBytes(eip8130Payer{addr: tt.payer})
+			if err != nil {
+				t.Fatalf("encode payer: %v", err)
 			}
-			if _, err := json.Marshal(ac); err == nil ||
-				!strings.Contains(err.Error(), "exactly one body") {
-				t.Fatalf("MarshalJSON: want exactly-one-body error, got %v", err)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("payer wire = %x, want %x", got, tt.want)
+			}
+
+			tx := NewTx(&Eip8130Tx{
+				ChainID:    big.NewInt(8453),
+				NonceKey:   big.NewInt(0),
+				GasTipCap:  big.NewInt(1),
+				GasFeeCap:  big.NewInt(2),
+				GasLimit:   21000,
+				Payer:      tt.payer,
+				SenderAuth: bytes.Repeat([]byte{0xab}, 65),
+				PayerAuth:  bytes.Repeat([]byte{0xcd}, 65),
+			})
+			enc := roundTripEip8130(t, tx.inner.(*Eip8130Tx))
+			if want := crypto.Keccak256Hash(enc); tx.Hash() != want {
+				t.Fatalf("hash = %x, want keccak(2718 encoding) %x", tx.Hash(), want)
+			}
+			var decoded Transaction
+			if err := decoded.UnmarshalBinary(enc); err != nil {
+				t.Fatalf("UnmarshalBinary: %v", err)
+			}
+			switch gotPayer := decoded.Eip8130().Payer; {
+			case tt.payer == nil && gotPayer != nil,
+				tt.payer != nil && (gotPayer == nil || *gotPayer != *tt.payer):
+				t.Fatalf("decoded payer = %v, want %v", gotPayer, tt.payer)
+			}
+
+			// The batcher reads blocks as JSON and re-encodes them, so the JSON
+			// form must map back to the same wire bytes.
+			data, err := tx.MarshalJSON()
+			if err != nil {
+				t.Fatalf("MarshalJSON: %v", err)
+			}
+			var fromJSON Transaction
+			if err := fromJSON.UnmarshalJSON(data); err != nil {
+				t.Fatalf("UnmarshalJSON: %v", err)
+			}
+			jsonEnc, err := fromJSON.MarshalBinary()
+			if err != nil {
+				t.Fatalf("MarshalBinary(from JSON): %v", err)
+			}
+			if !bytes.Equal(jsonEnc, enc) {
+				t.Fatalf("JSON round-trip not byte-exact:\n got %x\nwant %x", jsonEnc, enc)
 			}
 		})
+	}
+
+	for _, raw := range [][]byte{make([]byte, 20), {0x01}, make([]byte, 19)} {
+		buf, err := rlp.EncodeToBytes(raw)
+		if err != nil {
+			t.Fatalf("encode raw payer: %v", err)
+		}
+		var p eip8130Payer
+		if err := rlp.DecodeBytes(buf, &p); err == nil {
+			t.Fatalf("payer %x decoded successfully", raw)
+		}
 	}
 }
