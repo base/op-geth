@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -51,11 +52,21 @@ type txJSON struct {
 	S                    *hexutil.Big           `json:"s"`
 	YParity              *hexutil.Uint64        `json:"yParity,omitempty"`
 
-	// EIP-8130 fields: the transaction body is nested under "tx"; the two
-	// authorization blobs live at the top level.
-	Tx         *eip8130TxJSON `json:"tx,omitempty"`
-	SenderAuth *hexutil.Bytes `json:"senderAuth,omitempty"`
-	PayerAuth  *hexutil.Bytes `json:"payerAuth,omitempty"`
+	// EIP-8130 fields, flat beside the standard ones like every other type.
+	// chainId, nonce, gas and the fee caps reuse the fields above; nonceSequence
+	// and gasLimit are accepted as input aliases for nonce and gas.
+	Sender         *common.Address   `json:"sender,omitempty"`
+	NonceKey       *hexutil.Big      `json:"nonceKey,omitempty"`
+	NonceSequence  *hexutil.Uint64   `json:"nonceSequence,omitempty"`
+	ValidAfter     *hexutil.Uint64   `json:"validAfter,omitempty"`
+	ValidBefore    *hexutil.Uint64   `json:"validBefore,omitempty"`
+	GasLimit       *hexutil.Uint64   `json:"gasLimit,omitempty"`
+	AccountChanges *[]AccountChange  `json:"accountChanges,omitempty"`
+	Calls          *[][]Call         `json:"calls,omitempty"`
+	Metadata       *hexutil.Bytes    `json:"metadata,omitempty"`
+	Payer          *eip8130JSONPayer `json:"payer,omitempty"`
+	SenderAuth     *hexutil.Bytes    `json:"senderAuth,omitempty"`
+	PayerAuth      *hexutil.Bytes    `json:"payerAuth,omitempty"`
 
 	// Deposit transaction fields
 	SourceHash *common.Hash    `json:"sourceHash,omitempty"`
@@ -72,26 +83,38 @@ type txJSON struct {
 	Hash common.Hash `json:"hash"`
 }
 
-// eip8130TxJSON is the nested "tx" body of an EIP-8130 transaction. chainId,
-// nonceSequence, validAfter, validBefore and gasLimit are JSON numbers; nonceKey
-// and the fee caps are hex-string quantities; metadata is hex bytes. chainId,
-// nonceSequence, both validity bounds, gasLimit and the fee caps are required
-// (pointer fields whose absence is reported by UnmarshalJSON), matching the Rust
-// consensus type where these have no default.
-type eip8130TxJSON struct {
-	ChainID              *uint64         `json:"chainId"`
-	Sender               *common.Address `json:"sender"`
-	NonceKey             *hexutil.Big    `json:"nonceKey"`
-	NonceSequence        *uint64         `json:"nonceSequence"`
-	ValidAfter           *uint64         `json:"validAfter"`
-	ValidBefore          *uint64         `json:"validBefore"`
-	MaxPriorityFeePerGas *hexutil.Big    `json:"maxPriorityFeePerGas"`
-	MaxFeePerGas         *hexutil.Big    `json:"maxFeePerGas"`
-	GasLimit             *uint64         `json:"gasLimit"`
-	AccountChanges       []AccountChange `json:"accountChanges"`
-	Calls                [][]Call        `json:"calls"`
-	Metadata             hexutil.Bytes   `json:"metadata"`
-	Payer                *common.Address `json:"payer"`
+// eip8130JSONPayer is the JSON form of an EIP-8130 payer: a 20-byte address,
+// where the zero address is open payer mode. Open payer mode is also accepted
+// as a short all-zero hex string such as "0x00", matching its one-byte wire
+// form, as base-reth does.
+type eip8130JSONPayer common.Address
+
+func (p eip8130JSONPayer) MarshalJSON() ([]byte, error) {
+	return json.Marshal(common.Address(p))
+}
+
+func (p *eip8130JSONPayer) UnmarshalJSON(input []byte) error {
+	var raw string
+	if err := json.Unmarshal(input, &raw); err != nil {
+		return err
+	}
+	digits, ok := strings.CutPrefix(raw, "0x")
+	if !ok {
+		digits, ok = strings.CutPrefix(raw, "0X")
+	}
+	if !ok {
+		return errors.New("eip8130: payer must be 0x-prefixed hex")
+	}
+	if digits != "" && len(digits) < 2*common.AddressLength && strings.Trim(digits, "0") == "" {
+		*p = eip8130JSONPayer{}
+		return nil
+	}
+	var addr common.Address
+	if err := addr.UnmarshalText([]byte(raw)); err != nil {
+		return err
+	}
+	*p = eip8130JSONPayer(addr)
+	return nil
 }
 
 // yParityValue returns the YParity value from JSON. For backwards-compatibility reasons,
@@ -217,29 +240,31 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		if calls == nil {
 			calls = [][]Call{}
 		}
-		nonceSequence := itx.NonceSequence
-		validAfter := itx.ValidAfter
-		validBefore := itx.ValidBefore
-		gasLimit := itx.GasLimit
-		body := &eip8130TxJSON{
-			Sender:               itx.Sender,
-			NonceKey:             (*hexutil.Big)(itx.NonceKey),
-			NonceSequence:        &nonceSequence,
-			ValidAfter:           &validAfter,
-			ValidBefore:          &validBefore,
-			MaxPriorityFeePerGas: (*hexutil.Big)(itx.GasTipCap),
-			MaxFeePerGas:         (*hexutil.Big)(itx.GasFeeCap),
-			GasLimit:             &gasLimit,
-			AccountChanges:       accountChanges,
-			Calls:                calls,
-			Metadata:             hexutil.Bytes(itx.Metadata),
-			Payer:                itx.Payer,
+		nonceKey := itx.NonceKey
+		if nonceKey == nil {
+			nonceKey = new(big.Int)
 		}
-		if itx.ChainID != nil {
-			chainID := itx.ChainID.Uint64()
-			body.ChainID = &chainID
+		metadata := hexutil.Bytes(itx.Metadata)
+		if metadata == nil {
+			metadata = hexutil.Bytes{}
 		}
-		enc.Tx = body
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.Sender = itx.Sender
+		enc.NonceKey = (*hexutil.Big)(nonceKey)
+		enc.Nonce = (*hexutil.Uint64)(&itx.NonceSequence)
+		enc.ValidAfter = (*hexutil.Uint64)(&itx.ValidAfter)
+		enc.ValidBefore = (*hexutil.Uint64)(&itx.ValidBefore)
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(itx.GasTipCap)
+		enc.MaxFeePerGas = (*hexutil.Big)(itx.GasFeeCap)
+		enc.Gas = (*hexutil.Uint64)(&itx.GasLimit)
+		enc.AccountChanges = &accountChanges
+		enc.Calls = &calls
+		enc.Metadata = &metadata
+		enc.Payer = (*eip8130JSONPayer)(itx.Payer)
+		// The standard single-call fields, as a transaction with no single
+		// recipient; the calls themselves are in calls.
+		enc.Value = (*hexutil.Big)(new(big.Int))
+		enc.Input = &hexutil.Bytes{}
 		senderAuth := hexutil.Bytes(itx.SenderAuth)
 		enc.SenderAuth = &senderAuth
 		payerAuth := hexutil.Bytes(itx.PayerAuth)
@@ -659,53 +684,65 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 	case Eip8130TxType:
 		var itx Eip8130Tx
 		inner = &itx
-		if dec.Tx == nil {
-			return errors.New("missing required field 'tx' in transaction")
+		if dec.ChainID == nil {
+			return errors.New("missing required field 'chainId' in transaction")
 		}
-		body := dec.Tx
-		if body.ChainID == nil {
-			return errors.New("missing required field 'chainId' for txdata")
+		itx.ChainID = (*big.Int)(dec.ChainID)
+		itx.Sender = dec.Sender
+		if dec.NonceKey == nil {
+			return errors.New("missing required field 'nonceKey' in transaction")
 		}
-		itx.ChainID = new(big.Int).SetUint64(*body.ChainID)
-		itx.Sender = body.Sender
-		if body.NonceKey != nil {
-			if (*big.Int)(body.NonceKey).BitLen() > 256 {
-				return errors.New("'nonceKey' value overflows uint256")
-			}
-			itx.NonceKey = (*big.Int)(body.NonceKey)
-		} else {
-			itx.NonceKey = new(big.Int)
+		if (*big.Int)(dec.NonceKey).BitLen() > 256 {
+			return errors.New("'nonceKey' value overflows uint256")
 		}
-		if body.NonceSequence == nil {
-			return errors.New("missing required field 'nonceSequence' for txdata")
+		itx.NonceKey = (*big.Int)(dec.NonceKey)
+		switch {
+		case dec.Nonce != nil:
+			itx.NonceSequence = uint64(*dec.Nonce)
+		case dec.NonceSequence != nil:
+			itx.NonceSequence = uint64(*dec.NonceSequence)
+		default:
+			return errors.New("missing required field 'nonce' in transaction")
 		}
-		itx.NonceSequence = *body.NonceSequence
-		if body.ValidAfter == nil {
-			return errors.New("missing required field 'validAfter' for txdata")
+		if dec.ValidAfter == nil {
+			return errors.New("missing required field 'validAfter' in transaction")
 		}
-		itx.ValidAfter = *body.ValidAfter
-		if body.ValidBefore == nil {
-			return errors.New("missing required field 'validBefore' for txdata")
+		itx.ValidAfter = uint64(*dec.ValidAfter)
+		if dec.ValidBefore == nil {
+			return errors.New("missing required field 'validBefore' in transaction")
 		}
-		itx.ValidBefore = *body.ValidBefore
-		if body.MaxPriorityFeePerGas == nil {
-			return errors.New("missing required field 'maxPriorityFeePerGas' for txdata")
+		itx.ValidBefore = uint64(*dec.ValidBefore)
+		if dec.MaxPriorityFeePerGas == nil {
+			return errors.New("missing required field 'maxPriorityFeePerGas' in transaction")
 		}
-		itx.GasTipCap = (*big.Int)(body.MaxPriorityFeePerGas)
-		if body.MaxFeePerGas == nil {
-			return errors.New("missing required field 'maxFeePerGas' for txdata")
+		itx.GasTipCap = (*big.Int)(dec.MaxPriorityFeePerGas)
+		if dec.MaxFeePerGas == nil {
+			return errors.New("missing required field 'maxFeePerGas' in transaction")
 		}
-		itx.GasFeeCap = (*big.Int)(body.MaxFeePerGas)
-		if body.GasLimit == nil {
-			return errors.New("missing required field 'gasLimit' for txdata")
+		itx.GasFeeCap = (*big.Int)(dec.MaxFeePerGas)
+		switch {
+		case dec.Gas != nil:
+			itx.GasLimit = uint64(*dec.Gas)
+		case dec.GasLimit != nil:
+			itx.GasLimit = uint64(*dec.GasLimit)
+		default:
+			return errors.New("missing required field 'gas' in transaction")
 		}
-		itx.GasLimit = *body.GasLimit
+		if dec.AccountChanges == nil {
+			return errors.New("missing required field 'accountChanges' in transaction")
+		}
+		if dec.Calls == nil {
+			return errors.New("missing required field 'calls' in transaction")
+		}
+		if dec.Metadata == nil {
+			return errors.New("missing required field 'metadata' in transaction")
+		}
 		// Empty account_changes and calls encode as the canonical RLP empty list
 		// (0xc0); nil and empty slices are equivalent here.
-		itx.AccountChanges = body.AccountChanges
-		itx.Calls = body.Calls
-		itx.Metadata = body.Metadata
-		itx.Payer = body.Payer
+		itx.AccountChanges = *dec.AccountChanges
+		itx.Calls = *dec.Calls
+		itx.Metadata = *dec.Metadata
+		itx.Payer = (*common.Address)(dec.Payer)
 		if dec.SenderAuth != nil {
 			itx.SenderAuth = *dec.SenderAuth
 		}

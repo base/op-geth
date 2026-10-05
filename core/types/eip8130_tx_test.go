@@ -448,13 +448,9 @@ func TestEip8130TxJSONRequiresValidityBounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		t.Fatalf("unmarshal output: %v", err)
-	}
 	var validBody map[string]json.RawMessage
-	if err := json.Unmarshal(top["tx"], &validBody); err != nil {
-		t.Fatalf("unmarshal tx body: %v", err)
+	if err := json.Unmarshal(data, &validBody); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
 	}
 
 	tests := []struct {
@@ -481,7 +477,7 @@ func TestEip8130TxJSONRequiresValidityBounds(t *testing.T) {
 			mutate: func(body map[string]json.RawMessage) {
 				delete(body, "validAfter")
 				delete(body, "validBefore")
-				body["expiry"] = json.RawMessage(`200`)
+				body["expiry"] = json.RawMessage(`"0xc8"`)
 			},
 			wantMissing: "validAfter",
 		},
@@ -493,12 +489,7 @@ func TestEip8130TxJSONRequiresValidityBounds(t *testing.T) {
 				body[key] = value
 			}
 			tt.mutate(body)
-			bodyJSON, err := json.Marshal(body)
-			if err != nil {
-				t.Fatalf("marshal tx body: %v", err)
-			}
-			top["tx"] = bodyJSON
-			input, err := json.Marshal(top)
+			input, err := json.Marshal(body)
 			if err != nil {
 				t.Fatalf("marshal input: %v", err)
 			}
@@ -576,7 +567,7 @@ func TestEip8130AccountChangeJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
 	}
-	want := `{"type":"delegation","target":"0xdd00000000000000000000000000000000000000"}`
+	want := `{"type":"0x1","target":"0xdd00000000000000000000000000000000000000"}`
 	if string(data) != want {
 		t.Fatalf("delegation JSON = %s, want %s", data, want)
 	}
@@ -588,47 +579,53 @@ func TestEip8130AccountChangeJSON(t *testing.T) {
 		t.Fatalf("decoded delegation mismatch: %+v", decoded)
 	}
 
+	if err := json.Unmarshal([]byte(`{"type":"0x01","target":"0xdd00000000000000000000000000000000000000"}`), &decoded); err != nil ||
+		decoded.Delegation == nil || decoded.Delegation.Target != (common.Address{0xdd}) {
+		t.Fatalf("zero-padded delegation type: decoded %+v, err %v", decoded, err)
+	}
+
 	for _, input := range []string{
-		`{"type":"create","userSalt":"0x00","code":"0x","initialActors":[]}`,
-		`{"type":"configChange","channel":"Local","sequence":0,"changes":[],"signature":"0x"}`,
+		`{"type":"0x2","userSalt":"0x00","code":"0x","initialActors":[]}`,
+		`{"type":"0x3","channel":"0x0","sequence":"0x0","changes":[],"signature":"0x"}`,
+		`{"type":"delegation","target":"0xdd00000000000000000000000000000000000000"}`,
 	} {
 		if err := json.Unmarshal([]byte(input), &decoded); err == nil ||
 			!strings.Contains(err.Error(), "unknown account change type") {
 			t.Fatalf("%s: want unknown-type error, got %v", input, err)
 		}
 	}
-	if err := json.Unmarshal([]byte(`{"type":"delegation"}`), &decoded); err == nil ||
+	if err := json.Unmarshal([]byte(`{"type":"0x1"}`), &decoded); err == nil ||
 		!strings.Contains(err.Error(), "missing required field 'target'") {
 		t.Fatalf("delegation without target: want missing-target error, got %v", err)
 	}
 }
 
 // TestEip8130TxJSONRethShape decodes a hand-written JSON literal in base-reth's
-// exact RPC shape (mirroring rpc-types' can_serialize_eip8130) and asserts that
-// op-geth accepts it, that the decoded tx re-encodes byte-stably, and that
-// MarshalJSON reproduces the same nested shape (chainId as a number, nonceKey as
-// "0x0", fee caps as hex quantities, nested account_changes / calls objects).
+// flat RPC shape and asserts that op-geth accepts it, that the decoded tx
+// re-encodes byte-stably, and that MarshalJSON reproduces the same shape: every
+// integer a hex quantity, the standard names nonce and gas, and the standard
+// single-call fields to/value/input beside calls.
 func TestEip8130TxJSONRethShape(t *testing.T) {
 	senderAuth := "0x" + strings.Repeat("ab", 32)
 	input := `{
 		"type":"0x79",
-		"tx":{
-			"chainId":8453,
-			"sender":"0x0000000000000000000000000000000000000011",
-			"nonceKey":"0x0",
-			"nonceSequence":7,
-			"validAfter":0,
-			"validBefore":0,
-			"maxPriorityFeePerGas":"0x3b9aca00",
-			"maxFeePerGas":"0x12a05f200",
-			"gasLimit":1000000,
-			"accountChanges":[{"type":"delegation","target":"0x00000000000000000000000000000000000000dd"}],
-			"calls":[[{"to":"0x00000000000000000000000000000000000000aa","value":"0x1234","data":"0xdeadbeef"}]],
-			"metadata":"0x",
-			"payer":null
-		},
+		"chainId":"0x2105",
+		"sender":"0x0000000000000000000000000000000000000011",
+		"nonceKey":"0x0",
+		"nonce":"0x7",
+		"validAfter":"0x0",
+		"validBefore":"0x0",
+		"maxPriorityFeePerGas":"0x3b9aca00",
+		"maxFeePerGas":"0x12a05f200",
+		"gas":"0xf4240",
+		"accountChanges":[{"type":"0x1","target":"0x00000000000000000000000000000000000000dd"}],
+		"calls":[[{"to":"0x00000000000000000000000000000000000000aa","value":"0x1234","data":"0xdeadbeef"}]],
+		"metadata":"0x",
 		"senderAuth":"` + senderAuth + `",
-		"payerAuth":"0x"
+		"payerAuth":"0x",
+		"to":null,
+		"value":"0x0",
+		"input":"0x"
 	}`
 
 	var tx Transaction
@@ -644,6 +641,9 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 	}
 	if inner.ChainID.Uint64() != 8453 || inner.NonceSequence != 7 || inner.GasLimit != 1000000 {
 		t.Fatalf("decoded scalars mismatch: %+v", inner)
+	}
+	if inner.Payer != nil {
+		t.Fatalf("payer = %x, want self-pay", *inner.Payer)
 	}
 	if len(inner.AccountChanges) != 1 || inner.AccountChanges[0].Delegation == nil {
 		t.Fatalf("account_changes not decoded: %+v", inner.AccountChanges)
@@ -678,7 +678,7 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 		t.Fatalf("binary not stable:\n got %x\nwant %x", bin2, bin)
 	}
 
-	// MarshalJSON must reproduce reth's nested shape and field representations.
+	// MarshalJSON must reproduce reth's flat shape and field representations.
 	out, err := tx.MarshalJSON()
 	if err != nil {
 		t.Fatalf("MarshalJSON: %v", err)
@@ -687,55 +687,123 @@ func TestEip8130TxJSONRethShape(t *testing.T) {
 	if err := json.Unmarshal(out, &top); err != nil {
 		t.Fatalf("unmarshal output: %v", err)
 	}
-	for k, want := range map[string]string{
-		"type":       `"0x79"`,
-		"senderAuth": `"` + senderAuth + `"`,
-		"payerAuth":  `"0x"`,
-	} {
-		if string(top[k]) != want {
-			t.Fatalf("top-level %q = %s, want %s", k, top[k], want)
-		}
-	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(top["tx"], &body); err != nil {
-		t.Fatalf("unmarshal tx body: %v", err)
+	if _, nested := top["tx"]; nested {
+		t.Fatalf("transaction fields are nested under tx: %s", out)
 	}
 	for k, want := range map[string]string{
-		"chainId":              `8453`,    // JSON number
-		"nonceKey":             `"0x0"`,   // hex quantity
-		"nonceSequence":        `7`,       // JSON number
-		"validAfter":           `0`,       // JSON number
-		"validBefore":          `0`,       // JSON number
-		"gasLimit":             `1000000`, // JSON number
+		"type":                 `"0x79"`,
+		"chainId":              `"0x2105"`,
+		"sender":               `"0x0000000000000000000000000000000000000011"`,
+		"nonceKey":             `"0x0"`,
+		"nonce":                `"0x7"`,
+		"validAfter":           `"0x0"`,
+		"validBefore":          `"0x0"`,
 		"maxPriorityFeePerGas": `"0x3b9aca00"`,
 		"maxFeePerGas":         `"0x12a05f200"`,
+		"gas":                  `"0xf4240"`,
 		"metadata":             `"0x"`,
-		"payer":                `null`,
-		"sender":               `"0x0000000000000000000000000000000000000011"`,
+		"senderAuth":           `"` + senderAuth + `"`,
+		"payerAuth":            `"0x"`,
+		"to":                   `null`,
+		"value":                `"0x0"`,
+		"input":                `"0x"`,
 	} {
-		if string(body[k]) != want {
-			t.Fatalf("tx body %q = %s, want %s", k, body[k], want)
+		if string(top[k]) != want {
+			t.Fatalf("%q = %s, want %s", k, top[k], want)
 		}
 	}
+	if _, ok := top["payer"]; ok {
+		t.Fatalf("self-pay emitted payer %s", top["payer"])
+	}
 
-	// Nested account_changes / calls keep reth's structured JSON shape.
 	var changes []map[string]json.RawMessage
-	if err := json.Unmarshal(body["accountChanges"], &changes); err != nil {
+	if err := json.Unmarshal(top["accountChanges"], &changes); err != nil {
 		t.Fatalf("unmarshal accountChanges: %v", err)
 	}
-	if len(changes) != 1 || string(changes[0]["type"]) != `"delegation"` ||
+	if len(changes) != 1 || string(changes[0]["type"]) != `"0x1"` ||
 		string(changes[0]["target"]) != `"0x00000000000000000000000000000000000000dd"` {
-		t.Fatalf("accountChanges shape mismatch: %s", body["accountChanges"])
+		t.Fatalf("accountChanges shape mismatch: %s", top["accountChanges"])
 	}
 	var calls [][]map[string]json.RawMessage
-	if err := json.Unmarshal(body["calls"], &calls); err != nil {
+	if err := json.Unmarshal(top["calls"], &calls); err != nil {
 		t.Fatalf("unmarshal calls: %v", err)
 	}
 	if len(calls) != 1 || len(calls[0]) != 1 ||
 		string(calls[0][0]["to"]) != `"0x00000000000000000000000000000000000000aa"` ||
 		string(calls[0][0]["value"]) != `"0x1234"` ||
 		string(calls[0][0]["data"]) != `"0xdeadbeef"` {
-		t.Fatalf("calls shape mismatch: %s", body["calls"])
+		t.Fatalf("calls shape mismatch: %s", top["calls"])
+	}
+}
+
+// TestEip8130TxJSONAliases locks the legacy input names nonceSequence and
+// gasLimit, accepted for nonce and gas as base-reth does.
+func TestEip8130TxJSONAliases(t *testing.T) {
+	input := `{"type":"0x79","chainId":"0x1","nonceKey":"0x0","nonceSequence":"0x5",
+		"validAfter":"0x0","validBefore":"0x0","maxPriorityFeePerGas":"0x1",
+		"maxFeePerGas":"0x2","gasLimit":"0x5208","accountChanges":[],"calls":[],
+		"metadata":"0x","senderAuth":"0x","payerAuth":"0x"}`
+	var tx Transaction
+	if err := tx.UnmarshalJSON([]byte(input)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if inner := tx.Eip8130(); inner.NonceSequence != 5 || inner.GasLimit != 21000 {
+		t.Fatalf("aliases not decoded: nonce %d gas %d", inner.NonceSequence, inner.GasLimit)
+	}
+}
+
+// TestEip8130TxJSONBaseRethBlock decodes a sponsored transaction exactly as
+// base-reth served it in a block (vibenet, block 1472) and checks that its hash
+// matches, which proves the JSON maps back to the same wire bytes. The batcher
+// reads blocks this way.
+func TestEip8130TxJSONBaseRethBlock(t *testing.T) {
+	input := `{"type":"0x79","chainId":"0x509f455","sender":"0xa82cf562e06cd3b3972a8fe412ccb27f6687d6d4","nonceKey":"0x0","nonce":"0x0","validAfter":"0x0","validBefore":"0x1a10cafaa8e","maxPriorityFeePerGas":"0x3baa0c40","maxFeePerGas":"0x77541880","gas":"0x13b81","accountChanges":[],"calls":[[{"to":"0xa82cf562e06cd3b3972a8fe412ccb27f6687d6d4","value":"0x0","data":"0x"}]],"metadata":"0x53706f6e736f726564207472616e73616374696f6e","payer":"0xfedbf7fb9716409586bcc74175b2704bdf919ef0","senderAuth":"0x00000000000000000000000000000000000000011d75ebd8b3353701da1374e6cee1bcd5b1244a286f3f34c2dc4a3582fc4e8ebf23325e339966b27ff0dc8746d7887a448dc24fc4c3968fd61276f96079241e3c1c","payerAuth":"0x0000000000000000000000000000000000000001e6fae62b597261b938904061ee4429f7b32804bf172f2dcc769e227fcb5d9e093f45df9635b63ca978bec09563406096eae98abf07b6d52bcb8237125d1e59431c","to":null,"value":"0x0","input":"0x","blockHash":"0x2de116753e60940748e13c8bd264bd9e032f1a8067c2634adfcc3786e1ea9708","blockNumber":"0x5c0","transactionIndex":"0x2","blockTimestamp":"0x6ac3c26d","blockTimestampMs":"0x1a10caf7b58","from":"0xa82cf562e06cd3b3972a8fe412ccb27f6687d6d4","hash":"0xeb0af43a47d448c10786605a0900b0c0bb5a70c83785bd3183e1ceda145134f3","gasPrice":"0x7744d640"}`
+	var tx Transaction
+	if err := tx.UnmarshalJSON([]byte(input)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	want := common.HexToHash("0xeb0af43a47d448c10786605a0900b0c0bb5a70c83785bd3183e1ceda145134f3")
+	if tx.Hash() != want {
+		t.Fatalf("hash = %x, want %x", tx.Hash(), want)
+	}
+}
+
+// TestEip8130TxJSONOpenPayer locks the open payer JSON: emitted as the zero
+// address, and accepted as the zero address or a short all-zero hex string.
+func TestEip8130TxJSONOpenPayer(t *testing.T) {
+	tx := NewTx(&Eip8130Tx{
+		ChainID:    big.NewInt(1),
+		NonceKey:   big.NewInt(0),
+		GasTipCap:  big.NewInt(1),
+		GasFeeCap:  big.NewInt(2),
+		GasLimit:   21000,
+		Payer:      new(common.Address),
+		SenderAuth: bytes.Repeat([]byte{0xab}, 65),
+		PayerAuth:  bytes.Repeat([]byte{0xcd}, 65),
+	})
+	out, err := tx.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	if !strings.Contains(string(out), `"payer":"0x0000000000000000000000000000000000000000"`) {
+		t.Fatalf("open payer not emitted as the zero address: %s", out)
+	}
+	for _, payer := range []string{`"0x00"`, `"0x0"`, `"0x0000000000000000000000000000000000000000"`} {
+		in := strings.Replace(string(out), `"0x0000000000000000000000000000000000000000"`, payer, 1)
+		var decoded Transaction
+		if err := decoded.UnmarshalJSON([]byte(in)); err != nil {
+			t.Fatalf("payer %s: UnmarshalJSON: %v", payer, err)
+		}
+		if p := decoded.Eip8130().Payer; p == nil || *p != (common.Address{}) {
+			t.Fatalf("payer %s: decoded %v, want open payer", payer, p)
+		}
+		if decoded.Hash() != tx.Hash() {
+			t.Fatalf("payer %s: hash = %x, want %x", payer, decoded.Hash(), tx.Hash())
+		}
+	}
+	var bad Transaction
+	if err := bad.UnmarshalJSON([]byte(strings.Replace(string(out), `"0x0000000000000000000000000000000000000000"`, `"0x01"`, 1))); err == nil {
+		t.Fatalf("short non-zero payer decoded successfully")
 	}
 }
 

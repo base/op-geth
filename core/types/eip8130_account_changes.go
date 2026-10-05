@@ -23,6 +23,7 @@ import (
 	"io"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -84,7 +85,8 @@ func (a *AccountChange) DecodeRLP(s *rlp.Stream) error {
 	return s.ListEnd()
 }
 
-// MarshalJSON encodes the entry as its body object plus a "type" discriminator.
+// MarshalJSON encodes the entry as its body object plus a "type" discriminator,
+// the wire type byte as a JSON-RPC quantity ("0x1" for delegation).
 func (a AccountChange) MarshalJSON() ([]byte, error) {
 	if a.Delegation == nil {
 		return nil, errAccountChangeMissingBody
@@ -93,12 +95,13 @@ func (a AccountChange) MarshalJSON() ([]byte, error) {
 		Type   string         `json:"type"`
 		Target common.Address `json:"target"`
 	}{
-		Type:   "delegation",
+		Type:   hexutil.EncodeUint64(accountChangeTypeDelegation),
 		Target: a.Delegation.Target,
 	})
 }
 
-// UnmarshalJSON accepts only the "delegation" discriminator.
+// UnmarshalJSON accepts only the delegation type byte, as "0x1" or the
+// zero-padded "0x01".
 func (a *AccountChange) UnmarshalJSON(input []byte) error {
 	var dec struct {
 		Type   string          `json:"type"`
@@ -107,7 +110,7 @@ func (a *AccountChange) UnmarshalJSON(input []byte) error {
 	if err := json.Unmarshal(input, &dec); err != nil {
 		return err
 	}
-	if dec.Type != "delegation" {
+	if dec.Type != "0x1" && dec.Type != "0x01" {
 		return fmt.Errorf("eip8130: unknown account change type %q", dec.Type)
 	}
 	if dec.Target == nil {
