@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -51,6 +52,22 @@ type txJSON struct {
 	S                    *hexutil.Big           `json:"s"`
 	YParity              *hexutil.Uint64        `json:"yParity,omitempty"`
 
+	// Base transaction fields, flat beside the standard ones like every other type.
+	// chainId, nonce, gas and the fee caps reuse the fields above; nonceSequence
+	// and gasLimit are accepted as input aliases for nonce and gas.
+	Sender         *common.Address  `json:"sender,omitempty"`
+	NonceKey       *hexutil.Big     `json:"nonceKey,omitempty"`
+	NonceSequence  *hexutil.Uint64  `json:"nonceSequence,omitempty"`
+	ValidAfter     *hexutil.Uint64  `json:"validAfter,omitempty"`
+	ValidBefore    *hexutil.Uint64  `json:"validBefore,omitempty"`
+	GasLimit       *hexutil.Uint64  `json:"gasLimit,omitempty"`
+	AccountChanges *[]AccountChange `json:"accountChanges,omitempty"`
+	Calls          *[][]Call        `json:"calls,omitempty"`
+	Metadata       *hexutil.Bytes   `json:"metadata,omitempty"`
+	Payer          *baseTxJSONPayer `json:"payer,omitempty"`
+	SenderAuth     *hexutil.Bytes   `json:"senderAuth,omitempty"`
+	PayerAuth      *hexutil.Bytes   `json:"payerAuth,omitempty"`
+
 	// Deposit transaction fields
 	SourceHash *common.Hash    `json:"sourceHash,omitempty"`
 	From       *common.Address `json:"from,omitempty"`
@@ -64,6 +81,40 @@ type txJSON struct {
 
 	// Only used for encoding:
 	Hash common.Hash `json:"hash"`
+}
+
+// baseTxJSONPayer is the JSON form of a Base transaction payer: a 20-byte address,
+// where the zero address is open payer mode. Open payer mode is also accepted
+// as a short all-zero hex string such as "0x00", matching its one-byte wire
+// form, as base-reth does.
+type baseTxJSONPayer common.Address
+
+func (p baseTxJSONPayer) MarshalJSON() ([]byte, error) {
+	return json.Marshal(common.Address(p))
+}
+
+func (p *baseTxJSONPayer) UnmarshalJSON(input []byte) error {
+	var raw string
+	if err := json.Unmarshal(input, &raw); err != nil {
+		return err
+	}
+	digits, ok := strings.CutPrefix(raw, "0x")
+	if !ok {
+		digits, ok = strings.CutPrefix(raw, "0X")
+	}
+	if !ok {
+		return errors.New("base tx: payer must be 0x-prefixed hex")
+	}
+	if digits != "" && len(digits) < 2*common.AddressLength && strings.Trim(digits, "0") == "" {
+		*p = baseTxJSONPayer{}
+		return nil
+	}
+	var addr common.Address
+	if err := addr.UnmarshalText([]byte(raw)); err != nil {
+		return err
+	}
+	*p = baseTxJSONPayer(addr)
+	return nil
 }
 
 // yParityValue returns the YParity value from JSON. For backwards-compatibility reasons,
@@ -178,6 +229,46 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		enc.S = (*hexutil.Big)(itx.S.ToBig())
 		yparity := itx.V.Uint64()
 		enc.YParity = (*hexutil.Uint64)(&yparity)
+
+	case *BaseTx:
+		// Empty account_changes and calls serialize as JSON arrays, not null.
+		accountChanges := itx.AccountChanges
+		if accountChanges == nil {
+			accountChanges = []AccountChange{}
+		}
+		calls := itx.Calls
+		if calls == nil {
+			calls = [][]Call{}
+		}
+		nonceKey := itx.NonceKey
+		if nonceKey == nil {
+			nonceKey = new(big.Int)
+		}
+		metadata := hexutil.Bytes(itx.Metadata)
+		if metadata == nil {
+			metadata = hexutil.Bytes{}
+		}
+		enc.ChainID = (*hexutil.Big)(itx.ChainID)
+		enc.Sender = itx.Sender
+		enc.NonceKey = (*hexutil.Big)(nonceKey)
+		enc.Nonce = (*hexutil.Uint64)(&itx.NonceSequence)
+		enc.ValidAfter = (*hexutil.Uint64)(&itx.ValidAfter)
+		enc.ValidBefore = (*hexutil.Uint64)(&itx.ValidBefore)
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(itx.GasTipCap)
+		enc.MaxFeePerGas = (*hexutil.Big)(itx.GasFeeCap)
+		enc.Gas = (*hexutil.Uint64)(&itx.GasLimit)
+		enc.AccountChanges = &accountChanges
+		enc.Calls = &calls
+		enc.Metadata = &metadata
+		enc.Payer = (*baseTxJSONPayer)(itx.Payer)
+		// The standard single-call fields, as a transaction with no single
+		// recipient; the calls themselves are in calls.
+		enc.Value = (*hexutil.Big)(new(big.Int))
+		enc.Input = &hexutil.Bytes{}
+		senderAuth := hexutil.Bytes(itx.SenderAuth)
+		enc.SenderAuth = &senderAuth
+		payerAuth := hexutil.Bytes(itx.PayerAuth)
+		enc.PayerAuth = &payerAuth
 
 	case *DepositTx:
 		enc.Gas = (*hexutil.Uint64)(&itx.Gas)
@@ -590,6 +681,75 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		if dec.Nonce != nil {
 			inner = &depositTxWithNonce{DepositTx: itx, EffectiveNonce: uint64(*dec.Nonce)}
 		}
+	case BaseTxType:
+		var itx BaseTx
+		inner = &itx
+		if dec.ChainID == nil {
+			return errors.New("missing required field 'chainId' in transaction")
+		}
+		itx.ChainID = (*big.Int)(dec.ChainID)
+		itx.Sender = dec.Sender
+		if dec.NonceKey == nil {
+			return errors.New("missing required field 'nonceKey' in transaction")
+		}
+		if (*big.Int)(dec.NonceKey).BitLen() > 256 {
+			return errors.New("'nonceKey' value overflows uint256")
+		}
+		itx.NonceKey = (*big.Int)(dec.NonceKey)
+		switch {
+		case dec.Nonce != nil:
+			itx.NonceSequence = uint64(*dec.Nonce)
+		case dec.NonceSequence != nil:
+			itx.NonceSequence = uint64(*dec.NonceSequence)
+		default:
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		if dec.ValidAfter == nil {
+			return errors.New("missing required field 'validAfter' in transaction")
+		}
+		itx.ValidAfter = uint64(*dec.ValidAfter)
+		if dec.ValidBefore == nil {
+			return errors.New("missing required field 'validBefore' in transaction")
+		}
+		itx.ValidBefore = uint64(*dec.ValidBefore)
+		if dec.MaxPriorityFeePerGas == nil {
+			return errors.New("missing required field 'maxPriorityFeePerGas' in transaction")
+		}
+		itx.GasTipCap = (*big.Int)(dec.MaxPriorityFeePerGas)
+		if dec.MaxFeePerGas == nil {
+			return errors.New("missing required field 'maxFeePerGas' in transaction")
+		}
+		itx.GasFeeCap = (*big.Int)(dec.MaxFeePerGas)
+		switch {
+		case dec.Gas != nil:
+			itx.GasLimit = uint64(*dec.Gas)
+		case dec.GasLimit != nil:
+			itx.GasLimit = uint64(*dec.GasLimit)
+		default:
+			return errors.New("missing required field 'gas' in transaction")
+		}
+		if dec.AccountChanges == nil {
+			return errors.New("missing required field 'accountChanges' in transaction")
+		}
+		if dec.Calls == nil {
+			return errors.New("missing required field 'calls' in transaction")
+		}
+		if dec.Metadata == nil {
+			return errors.New("missing required field 'metadata' in transaction")
+		}
+		// Empty account_changes and calls encode as the canonical RLP empty list
+		// (0xc0); nil and empty slices are equivalent here.
+		itx.AccountChanges = *dec.AccountChanges
+		itx.Calls = *dec.Calls
+		itx.Metadata = *dec.Metadata
+		itx.Payer = (*common.Address)(dec.Payer)
+		if dec.SenderAuth != nil {
+			itx.SenderAuth = *dec.SenderAuth
+		}
+		if dec.PayerAuth != nil {
+			itx.PayerAuth = *dec.PayerAuth
+		}
+
 	default:
 		return ErrTxTypeNotSupported
 	}

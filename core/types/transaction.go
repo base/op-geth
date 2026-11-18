@@ -51,6 +51,7 @@ const (
 	DynamicFeeTxType = 0x02
 	BlobTxType       = 0x03
 	SetCodeTxType    = 0x04
+	BaseTxType       = 0x79
 )
 
 // Transaction is an Ethereum transaction.
@@ -223,6 +224,8 @@ func (tx *Transaction) decodeTyped(b []byte) (TxData, error) {
 		inner = new(BlobTx)
 	case SetCodeTxType:
 		inner = new(SetCodeTx)
+	case BaseTxType:
+		inner = new(BaseTx)
 	case DepositTxType:
 		inner = new(DepositTx)
 	default:
@@ -617,6 +620,13 @@ func (tx *Transaction) WithBlobTxSidecar(sideCar *BlobTxSidecar) *Transaction {
 		cpy.from.Store(f)
 	}
 	return cpy
+}
+
+// BaseTx returns the inner Base transaction, or nil if tx is not one. It
+// exposes the Base-transaction-specific fields, which have no generic accessors on Transaction.
+func (tx *Transaction) BaseTx() *BaseTx {
+	inner, _ := tx.inner.(*BaseTx)
+	return inner
 }
 
 // SetCodeAuthorizations returns the authorizations list of the transaction.
